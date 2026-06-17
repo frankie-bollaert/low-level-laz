@@ -1,0 +1,26 @@
+# Maven build output
+target/
+dependency-reduced-pom.xml
+pom.xml.versionsBackup
+release.properties
+
+# IDEs
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.project
+.classpath
+
+# Generated CSV output
+csv/
+*.csv
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

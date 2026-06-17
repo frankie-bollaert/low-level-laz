@@ -3,6 +3,7 @@ package com.spotable;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.Writer;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
@@ -209,14 +210,77 @@ public class LazBounds {
         return new int[] { projected, geographic };
     }
 
-    /** Extracts the last EPSG authority code from an OGC WKT CRS string, or null. */
+    /**
+     * Extracts the EPSG code of the file's <em>horizontal</em> CRS from an OGC WKT
+     * string, or null.
+     * <p>
+     * A LAS/LAZ projection VLR often carries a compound CRS — e.g.
+     * {@code COMPD_CS["...", PROJCS[... AUTHORITY["EPSG","6441"]], VERT_CS[... AUTHORITY["EPSG","6360"]]]}
+     * — pairing a horizontal (projected/geographic) CRS with a vertical height CRS.
+     * Scanning the whole string for the last {@code AUTHORITY["EPSG",...]} would
+     * return the <em>vertical</em> code (e.g. 6360 = "NAVD88 height (ftUS)"), which is
+     * not a horizontal CRS and cannot georeference the bounding box. So we look inside
+     * the projected sub-CRS first, then the geographic one, and only fall back to a
+     * whole-string scan when neither is present.
+     */
     private static Integer wktEpsg(String wkt) {
+        String horizontal = firstBracketedSpan(wkt, "PROJCS", "PROJCRS");
+        if (horizontal == null) {
+            horizontal = firstBracketedSpan(wkt, "GEOGCS", "GEOGCRS", "GEODCRS");
+        }
+        Integer epsg = horizontal != null ? lastEpsg(horizontal) : null;
+        return epsg != null ? epsg : lastEpsg(wkt);
+    }
+
+    /** The last EPSG authority code in a WKT fragment (the element's own code), or null. */
+    private static Integer lastEpsg(String wkt) {
         Matcher m = WKT_EPSG.matcher(wkt);
         Integer last = null;
         while (m.find()) {
-            last = Integer.valueOf(m.group(1));   // top-level CRS authority is the last match
+            last = Integer.valueOf(m.group(1));   // an element's own authority is its last match
         }
         return last;
+    }
+
+    /**
+     * Returns the bracket-balanced substring of the first WKT element named by any of
+     * {@code keywords} (e.g. {@code PROJCS[...]}), or null if none appears. Quoted names
+     * are skipped so brackets inside them don't affect nesting; both {@code []} and
+     * {@code ()} delimiters are accepted.
+     */
+    private static String firstBracketedSpan(String wkt, String... keywords) {
+        String upper = wkt.toUpperCase(Locale.ROOT);
+        for (String kw : keywords) {
+            for (int idx = upper.indexOf(kw); idx >= 0; idx = upper.indexOf(kw, idx + 1)) {
+                boolean leftOk = idx == 0 || !Character.isLetterOrDigit(upper.charAt(idx - 1));
+                int open = idx + kw.length();
+                while (open < upper.length() && Character.isWhitespace(upper.charAt(open))) open++;
+                if (leftOk && open < upper.length()
+                        && (upper.charAt(open) == '[' || upper.charAt(open) == '(')) {
+                    return balancedSpan(wkt, open);
+                }
+            }
+        }
+        return null;
+    }
+
+    /** The substring from {@code open} (a '[' or '(') through its matching close bracket. */
+    private static String balancedSpan(String s, int open) {
+        int depth = 0;
+        boolean inString = false;
+        for (int i = open; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '"') {
+                inString = !inString;
+            } else if (!inString) {
+                if (c == '[' || c == '(') {
+                    depth++;
+                } else if (c == ']' || c == ')') {
+                    if (--depth == 0) return s.substring(open, i + 1);
+                }
+            }
+        }
+        return s.substring(open);   // unbalanced; return the remainder
     }
 
     /**
@@ -262,22 +326,65 @@ public class LazBounds {
 
     // ---- CLI ----
 
+    /**
+     * Formats one RFC&nbsp;4180 CSV record: every field is wrapped in double quotes
+     * and any embedded quote is doubled. Always quoting keeps the WKT field — which
+     * contains commas — from being split, and makes the column boundary unambiguous.
+     */
+    static String csvRow(String... fields) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < fields.length; i++) {
+            if (i > 0) sb.append(',');
+            sb.append('"').append(fields[i].replace("\"", "\"\"")).append('"');
+        }
+        return sb.toString();
+    }
+
     public static void main(String[] args) throws IOException {
-        if (args.length < 1) {
-            System.err.println("Usage: java com.spotable.LazBounds <file|dir|glob|s3-uri>...");
-            System.err.println("  Local: a LAS/LAZ file, a directory (recursive *.las/*.laz),");
-            System.err.println("         or a glob such as 'data/**/*.laz'.");
-            System.err.println("  S3:    s3://bucket/key.laz (one object via ranged GET),");
-            System.err.println("         s3://bucket/prefix/ (recursive *.las/*.laz), or");
-            System.err.println("         s3://bucket/prefix/*.laz (glob over listed keys).");
-            System.err.println("  Prints one 'path; WKT' line per file.");
+        Path outFile = null;
+        List<String> inputs = new ArrayList<>();
+        for (int i = 0; i < args.length; i++) {
+            String a = args[i];
+            if (a.equals("-o") || a.equals("--out")) {
+                if (i + 1 >= args.length) {
+                    System.err.println(a + " requires a file path");
+                    System.exit(2);
+                }
+                outFile = Path.of(args[++i]);
+            } else if (a.equals("-i") || a.equals("--input")) {
+                if (i + 1 >= args.length) {
+                    System.err.println(a + " requires a file/dir/glob/s3-uri");
+                    System.exit(2);
+                }
+                inputs.add(args[++i]);
+            } else {
+                System.err.println("Unknown argument: " + a);
+                System.exit(2);
+            }
+        }
+
+        if (inputs.isEmpty()) {
+            System.err.println("Usage: java com.spotable.LazBounds -i <file|dir|glob|s3-uri> [-i ...] [-o out.csv]");
+            System.err.println("  -i/--input  (repeatable) source to read:");
+            System.err.println("    Local: a LAS/LAZ file, a directory (recursive *.las/*.laz),");
+            System.err.println("           or a glob such as 'data/**/*.laz'.");
+            System.err.println("    S3:    s3://bucket/key.laz (one object via ranged GET),");
+            System.err.println("           s3://bucket/prefix/ (recursive *.las/*.laz), or");
+            System.err.println("           s3://bucket/prefix/*.laz (glob over listed keys).");
+            System.err.println("  -o/--out    also write the CSV rows to this file.");
+            System.err.println("  Prints one CSV row per file to stdout: \"path\",\"wkt\".");
             return;
         }
 
-        boolean needsS3 = Arrays.stream(args).anyMatch(a -> a.startsWith("s3://"));
+        String[] inputArgs = inputs.toArray(new String[0]);
+        boolean needsS3 = inputs.stream().anyMatch(a -> a.startsWith("s3://"));
         int failures;
-        try (S3Client s3 = needsS3 ? S3Client.create() : null) {
-            List<Source> sources = collectSources(args, s3);
+        // Open the CSV file (if requested) for the whole run so every row is appended
+        // to the same file; it's truncated/created on open.
+        try (S3Client s3 = needsS3 ? S3Client.create() : null;
+             Writer csv = outFile != null
+                     ? Files.newBufferedWriter(outFile, StandardCharsets.UTF_8) : null) {
+            List<Source> sources = collectSources(inputArgs, s3);
             if (sources.isEmpty()) {
                 System.err.println("No LAS/LAZ files matched.");
                 return;
@@ -285,7 +392,12 @@ public class LazBounds {
             failures = 0;
             for (Source source : sources) {
                 try {
-                    System.out.println(source.label() + "; " + read(source).toWkt());
+                    String row = csvRow(source.label(), read(source).toWkt());
+                    System.out.println(row);
+                    if (csv != null) {
+                        csv.write(row);
+                        csv.write('\n');
+                    }
                 } catch (IOException | RuntimeException e) {
                     System.err.println("Skipping " + source.label() + ": " + e.getMessage());
                     failures++;
