@@ -110,4 +110,120 @@ public class LazNameBoundsTest {
         assertEquals(1, polys.get(0).holes().size());
         assertEquals(5, polys.get(0).shell().length);   // outer 3x3 square, collinear-cleaned
     }
+
+    // ---- projections / Florida State Plane LID tiles ----
+
+    @Test
+    public void generalTmInverseMatchesUtmForAUtmPoint() {
+        // The generic inverse-TM with UTM parameters must equal DtmNameBounds' UTM inverse.
+        double[] a = LazNameBounds.Proj.utm(17).lonLat(507000.0, 3_051_000.0);
+        double[] b = DtmNameBounds.Utm.toLonLat(507000.0, 3_051_000.0, 17);
+        assertEquals(b[0], a[0], 1e-9);
+        assertEquals(b[1], a[1], 1e-9);
+    }
+
+    @Test
+    public void decodesPeninsularLidTileToMetadataLocation() {
+        // 447196_W: idx 447196, West C=549701 -> k=102505 -> row=342, col=95
+        //        -> SW (475000 ft, 1710000 ft) State Plane West -> ~(-82.5669, 29.0365).
+        var m = LazNameBounds.parseLid(
+                "FL_Peninsular_2018_D18/FL_Peninsular_Citrus_2018/LAZ/"
+                + "USGS_LPC_FL_Peninsular_2018_D18_LID2019_447196_W.laz");
+        assertEquals("FL_Peninsular_Citrus_2018", m.project());   // group = sub-project dir
+        double[] sw = m.proj().lonLat(m.swE(), m.swN());
+        assertEquals(-82.56694, sw[0], 5e-4);   // metadata W -82.567014 (within the tile collar)
+        assertEquals(29.03651, sw[1], 5e-4);    // metadata S  29.036510
+
+        // An East-zone tile from the same family.
+        var e = LazNameBounds.parseLid("FL_Peninsular_FDEM_2018_D19_DRRA/x/LAZ/"
+                + "USGS_LPC_FL_Peninsular_FDEM_2018_D19_DRRA_LID2019_252706_E.laz");
+        double[] esw = e.proj().lonLat(e.swE(), e.swN());
+        assertEquals(-80.87876, esw[0], 5e-4);
+        assertEquals(28.79012, esw[1], 5e-4);
+    }
+
+    @Test
+    public void northZoneDecodesViaLambert() {
+        // HurricaneMichael 651011_N (State Plane North, EPSG:2238) -> ~(-84.083, 30.360).
+        var m = LazNameBounds.parseLid("FL_HurricaneMichael_2020_D20/x/LAZ/"
+                + "USGS_LPC_FL_HurricaneMichael_2020_D20_LID2019_651011_N.laz");
+        assertTrue(m.proj() instanceof LazNameBounds.LccProj);
+        double[] sw = m.proj().lonLat(m.swE(), m.swN());
+        assertEquals(-84.08306, sw[0], 5e-4);     // metadata W -84.083056
+        assertEquals(30.36040, sw[1], 5e-4);      // metadata S  30.360398
+    }
+
+    @Test
+    public void osceolaQuadrantDecodes() {
+        // 060759_E_A: East C=149767 -> parent SW (460000,1485000) ft, quad A = NW (+0,+2500)
+        //          -> 2500-ft tile SW (460000,1487500) ft -> ~(-81.6103, 28.4244).
+        var m = LazNameBounds.parseLid("FL_Osceola_2015/FL_Osceola_2015/LAZ/"
+                + "USGS_LPC_FL_Osceola_2015_LID2015_060759_E_A.laz");
+        assertEquals("FL_Osceola_2015", m.project());
+        assertEquals(2500 * 1200.0 / 3937.0, m.fixedTile(), 1e-6);   // 2500-ft tiles
+        double[] sw = m.proj().lonLat(m.swE(), m.swN());
+        assertEquals(-81.610308, sw[0], 2e-4);
+        assertEquals(28.424397, sw[1], 2e-4);
+    }
+
+    @Test
+    public void suwannee5DigitNorthDecodes() {
+        // 64019_N: North C=104051, factor 540 -> SW (2340000,375000) ft -> ~(-83.3260, 30.0259).
+        var m = LazNameBounds.parseLid("FL_Suwannee_River_FL_QL2_LiDAR_FY14_14/x/LAZ/"
+                + "USGS_LPC_FL_Suwannee_River_FL_QL2_LiDAR_FY14_14_LID2014_64019_N.laz");
+        assertTrue(m.proj() instanceof LazNameBounds.LccProj);
+        double[] sw = m.proj().lonLat(m.swE(), m.swN());
+        assertEquals(-83.326046, sw[0], 2e-4);
+        assertEquals(30.025889, sw[1], 2e-4);
+    }
+
+    @Test
+    public void miamiDadeNoSuffixDecodes() {
+        // 317533 (no E/W/N suffix, trailing _0901): East C=349767 -> SW (830000,540000) ft.
+        var m = LazNameBounds.parseLid("FL_MiamiDade_D23/x/LAZ/"
+                + "USGS_LPC_FL_MiamiDade_D23_LID2024_317533_0901.laz");
+        assertTrue(m.proj() instanceof LazNameBounds.TmProj);
+        double[] sw = m.proj().lonLat(m.swE(), m.swN());
+        assertEquals(-80.471561, sw[0], 2e-4);
+        assertEquals(25.818298, sw[1], 2e-4);
+    }
+
+    @Test
+    public void groupKeyPicksSubProjectDirFromS3Path() {
+        String s3 = "s3://spotable-geo-us-west-2/point-cloud/us/FL_Peninsular_FDEM_2018_D19_DRRA/"
+                + "FL_Peninsular_FDEM_Alachua_2018/LAZ/"
+                + "USGS_LPC_FL_Peninsular_FDEM_2018_D19_DRRA_LID2019_667309_N.laz";
+        assertEquals("FL_Peninsular_FDEM_Alachua_2018", LazNameBounds.groupKey(s3));
+        // groupDir keeps the full path up to (not including) the LAZ folder.
+        assertEquals("s3://spotable-geo-us-west-2/point-cloud/us/FL_Peninsular_FDEM_2018_D19_DRRA/"
+                + "FL_Peninsular_FDEM_Alachua_2018", LazNameBounds.groupDir(s3));
+    }
+
+    @Test
+    public void projectionsReportNativeHorizontalCrs() {
+        assertEquals("EPSG:26917", LazNameBounds.Proj.utm(17).epsg());
+        assertEquals("NAD83 / UTM zone 17N", LazNameBounds.Proj.utm(17).crs());
+        // State Plane North LID tile -> Florida North.
+        var n = LazNameBounds.parseLid("FL_HurricaneMichael_2020_D20/x/LAZ/"
+                + "USGS_LPC_FL_HurricaneMichael_2020_D20_LID2019_651011_N.laz");
+        assertEquals("EPSG:2238", n.proj().epsg());
+        assertEquals("NAD83 / Florida North ftUS", n.proj().crs());
+        // State Plane West LID tile -> Florida West.
+        var w = LazNameBounds.parseLid("FL_Peninsular_2018_D18/x/LAZ/"
+                + "USGS_LPC_FL_Peninsular_2018_D18_LID2019_447196_W.laz");
+        assertEquals("EPSG:2237", w.proj().epsg());
+        assertEquals("NAD83 / Florida West ftUS", w.proj().crs());
+    }
+
+    @Test
+    public void lidDecodeGatedToConfirmedProjectsAndForms() {
+        // Project not on the confirmed-origin allowlist -> not decoded.
+        assertNull(LazNameBounds.parseLid("FL_Made_Up_2099/x/LAZ/"
+                + "USGS_LPC_FL_Made_Up_2099_LID2019_447196_W.laz"));
+        // A Suwannee collection we have not verified -> not decoded.
+        assertNull(LazNameBounds.parseLid("FL_Suwannee_River_Lidar_2016_B16/x/LAZ/"
+                + "USGS_LPC_FL_Suwannee_River_Lidar_2016_B16_568390_N.laz"));
+        // MGRS names are not LID.
+        assertNull(LazNameBounds.parseLid("x/USGS_LPC_FL_2017FortDrum_C22_17RNL070510.laz"));
+    }
 }

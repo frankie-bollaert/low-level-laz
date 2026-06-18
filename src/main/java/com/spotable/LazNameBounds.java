@@ -102,14 +102,18 @@ public final class LazNameBounds {
         return northing;
     }
 
-    /** Tile footprint as EWKT {@code SRID=4326;POLYGON ((...))}, ring SW, SE, NE, NW, SW. */
+    /** MGRS tile footprint as EWKT (reprojected from its UTM zone). */
     static String toWgs84Wkt(Tile t, double tileMetres) {
-        double w = t.swEasting(), s = t.swNorthing();
-        double e = w + tileMetres, n = s + tileMetres;
-        double[] sw = DtmNameBounds.Utm.toLonLat(w, s, t.zone());
-        double[] se = DtmNameBounds.Utm.toLonLat(e, s, t.zone());
-        double[] ne = DtmNameBounds.Utm.toLonLat(e, n, t.zone());
-        double[] nw = DtmNameBounds.Utm.toLonLat(w, n, t.zone());
+        return toWgs84Wkt(Proj.utm(t.zone()), t.swEasting(), t.swNorthing(), tileMetres);
+    }
+
+    /** Tile footprint as EWKT {@code SRID=4326;POLYGON ((...))}, ring SW, SE, NE, NW, SW. */
+    static String toWgs84Wkt(Proj proj, double swE, double swN, double tileMetres) {
+        double w = swE, s = swN, e = swE + tileMetres, n = swN + tileMetres;
+        double[] sw = proj.lonLat(w, s);
+        double[] se = proj.lonLat(e, s);
+        double[] ne = proj.lonLat(e, n);
+        double[] nw = proj.lonLat(w, n);
         String polygon = String.format(Locale.ROOT,
                 "POLYGON ((%s %s, %s %s, %s %s, %s %s, %s %s))",
                 fmt(sw[0]), fmt(sw[1]), fmt(se[0]), fmt(se[1]),
@@ -127,6 +131,7 @@ public final class LazNameBounds {
     private static final double A = 6_378_137.0;
     private static final double F = 1.0 / 298.257223563;
     private static final double E2 = F * (2 - F);
+    private static final double EP2 = E2 / (1 - E2);
     private static final double K0 = 0.9996;
 
     /** Meridian distance from the equator to latitude {@code phi} (radians) on WGS84. */
@@ -136,6 +141,198 @@ public final class LazNameBounds {
                 - (3 * e2 / 8 + 3 * e4 / 32 + 45 * e6 / 1024) * Math.sin(2 * phi)
                 + (15 * e4 / 256 + 45 * e6 / 1024) * Math.sin(4 * phi)
                 - (35 * e6 / 3072) * Math.sin(6 * phi));
+    }
+
+    // ---- Projections: inverse Transverse Mercator + Lambert Conformal Conic ----
+
+    /** A map projection that can be inverted to WGS84 lon/lat, with its native CRS identity. */
+    sealed interface Proj permits TmProj, LccProj {
+        double[] lonLat(double easting, double northing);
+        /** EPSG code of the native horizontal CRS, e.g. {@code EPSG:26917}. */
+        String epsg();
+        /** Human-readable native horizontal CRS name, e.g. {@code NAD83 / UTM zone 17N}. */
+        String crs();
+        /** UTM zone as a Transverse-Mercator projection (metres), NAD83. */
+        static Proj utm(int zone) {
+            return new TmProj(zone * 6 - 183, 0, 0.9996, 500_000,
+                    26900 + zone, "NAD83 / UTM zone " + zone + "N");
+        }
+    }
+
+    /** Transverse Mercator (UTM, or Florida State Plane East/West). N hemisphere, FN=0. */
+    record TmProj(double lon0, double lat0, double k0, double fe, int epsgCode, String crs)
+            implements Proj {
+        public double[] lonLat(double e, double n) { return tmToLonLat(e, n, lon0, lat0, k0, fe); }
+        public String epsg() { return "EPSG:" + epsgCode; }
+    }
+
+    /** Lambert Conformal Conic 2SP (Florida State Plane North). FN=0. */
+    record LccProj(double lon0, double lat0, double lat1, double lat2, double fe,
+                   int epsgCode, String crs) implements Proj {
+        public double[] lonLat(double e, double n) {
+            return lccToLonLat(e, n, lon0, lat0, lat1, lat2, fe);
+        }
+        public String epsg() { return "EPSG:" + epsgCode; }
+    }
+
+    /** Inverse Transverse Mercator: easting/northing (metres) -> {lonDeg, latDeg}, WGS84 ellipsoid. */
+    static double[] tmToLonLat(double easting, double northing,
+                              double lon0deg, double lat0deg, double k0, double fe) {
+        double x = easting - fe;
+        double m = meridianArc(Math.toRadians(lat0deg)) + northing / k0;
+        double mu = m / (A * (1 - E2 / 4 - 3 * E2 * E2 / 64 - 5 * E2 * E2 * E2 / 256));
+        double e1 = (1 - Math.sqrt(1 - E2)) / (1 + Math.sqrt(1 - E2));
+        double phi1 = mu
+                + (3 * e1 / 2 - 27 * Math.pow(e1, 3) / 32) * Math.sin(2 * mu)
+                + (21 * e1 * e1 / 16 - 55 * Math.pow(e1, 4) / 32) * Math.sin(4 * mu)
+                + (151 * Math.pow(e1, 3) / 96) * Math.sin(6 * mu)
+                + (1097 * Math.pow(e1, 4) / 512) * Math.sin(8 * mu);
+        double sin1 = Math.sin(phi1), cos1 = Math.cos(phi1), tan1 = Math.tan(phi1);
+        double c1 = EP2 * cos1 * cos1, t1 = tan1 * tan1;
+        double n1 = A / Math.sqrt(1 - E2 * sin1 * sin1);
+        double r1 = A * (1 - E2) / Math.pow(1 - E2 * sin1 * sin1, 1.5);
+        double d = x / (n1 * k0);
+        double lat = phi1 - (n1 * tan1 / r1) * (d * d / 2
+                - (5 + 3 * t1 + 10 * c1 - 4 * c1 * c1 - 9 * EP2) * Math.pow(d, 4) / 24
+                + (61 + 90 * t1 + 298 * c1 + 45 * t1 * t1 - 252 * EP2 - 3 * c1 * c1) * Math.pow(d, 6) / 720);
+        double lon = Math.toRadians(lon0deg) + (d
+                - (1 + 2 * t1 + c1) * Math.pow(d, 3) / 6
+                + (5 - 2 * c1 + 28 * t1 - 3 * c1 * c1 + 8 * EP2 + 24 * t1 * t1) * Math.pow(d, 5) / 120) / cos1;
+        return new double[]{ Math.toDegrees(lon), Math.toDegrees(lat) };
+    }
+
+    /** Inverse Lambert Conformal Conic (2SP): easting/northing (metres) -> {lonDeg, latDeg}. */
+    static double[] lccToLonLat(double easting, double northing,
+                               double lon0deg, double lat0deg, double lat1deg, double lat2deg, double fe) {
+        double e = Math.sqrt(E2);
+        double lon0 = Math.toRadians(lon0deg), lat0 = Math.toRadians(lat0deg),
+               lat1 = Math.toRadians(lat1deg), lat2 = Math.toRadians(lat2deg);
+        double m1 = lccM(lat1, e), m2 = lccM(lat2, e);
+        double t0 = lccT(lat0, e), t1 = lccT(lat1, e), t2 = lccT(lat2, e);
+        double n = (Math.log(m1) - Math.log(m2)) / (Math.log(t1) - Math.log(t2));
+        double fc = m1 / (n * Math.pow(t1, n));
+        double rho0 = A * fc * Math.pow(t0, n);
+        double x = easting - fe, y = northing;                  // FN = 0
+        double rho = Math.signum(n) * Math.sqrt(x * x + (rho0 - y) * (rho0 - y));
+        double t = Math.pow(rho / (A * fc), 1 / n);
+        double theta = Math.atan2(x, rho0 - y);
+        double lon = lon0 + theta / n;
+        double phi = Math.PI / 2 - 2 * Math.atan(t);             // converges in a few iterations
+        for (int i = 0; i < 8; i++) {
+            double es = e * Math.sin(phi);
+            phi = Math.PI / 2 - 2 * Math.atan(t * Math.pow((1 - es) / (1 + es), e / 2));
+        }
+        return new double[]{ Math.toDegrees(lon), Math.toDegrees(phi) };
+    }
+
+    private static double lccM(double phi, double e) {
+        return Math.cos(phi) / Math.sqrt(1 - e * e * Math.sin(phi) * Math.sin(phi));
+    }
+
+    private static double lccT(double phi, double e) {
+        double es = e * Math.sin(phi);
+        return Math.tan(Math.PI / 4 - phi / 2) / Math.pow((1 - es) / (1 + es), e / 2);
+    }
+
+    // ---- Florida State Plane LID-gridded names (e.g. ..._LID2019_447196_W.laz) ----
+    //
+    // These tiles carry a 6-digit index into a 5000-ft Florida State Plane grid:
+    //     index = C - 300*row + col,  where row = N/5000ft, col = E/5000ft (SW corner)
+    // col is always < 300 (the zone's easting span), so the index inverts uniquely. The origin
+    // constant C is per State Plane zone (East/West), determined and verified against tile
+    // metadata. It is shared by the FL_Peninsular_* projects below but is NOT statewide (e.g.
+    // FL_ManateeCounty_B25 uses a different origin), so decoding is gated to confirmed projects.
+
+    private static final double US_FOOT = 1200.0 / 3937.0;          // US survey foot in metres
+    private static final double SP_K0 = 0.9999411764705882;         // FL TM zone scale (1 - 1/17000)
+    private static final double SP_TM_LAT0 = 24 + 20.0 / 60.0;      // TM grid origin latitude 24°20'N
+    private static final double SP_TM_FE = 200_000.0;               // TM false easting (metres)
+    private static final Proj SP_WEST =
+            new TmProj(-82, SP_TM_LAT0, SP_K0, SP_TM_FE, 2237, "NAD83 / Florida West ftUS");
+    private static final Proj SP_EAST =
+            new TmProj(-81, SP_TM_LAT0, SP_K0, SP_TM_FE, 2236, "NAD83 / Florida East ftUS");
+    private static final Proj SP_NORTH =
+            new LccProj(-84.5, 29.0, 30.75, 29 + 35.0 / 60.0, 600_000.0, 2238,
+                    "NAD83 / Florida North ftUS");
+    /** Per-State-Plane-zone grid: default origin constant C, the index modulus, and projection. */
+    private record ZoneDef(int c, int modulus, Proj proj) {}
+
+    // The index modulus is the zone's column span (must exceed any tile's column so the index
+    // inverts uniquely): 300 for the TM zones, 540 for the wide North zone. C is the default
+    // grid origin per zone; some projects override it (see LID_SCHEMES).
+    private static final java.util.Map<Character, ZoneDef> LID_ZONES = java.util.Map.of(
+            'W', new ZoneDef(549701, 300, SP_WEST),
+            'E', new ZoneDef(349767, 300, SP_EAST),
+            'N', new ZoneDef(704051, 540, SP_NORTH));
+
+    /**
+     * Per-project LID grid scheme (each verified against tile metadata):
+     * {@code forcedZone} when the name carries no E/W/N suffix (else read from the suffix);
+     * {@code overrideC} when the project's grid origin differs from the zone default;
+     * {@code tileFt} tile size (5000, or 2500 for quadrant projects); {@code quad} if the name
+     * ends with an A/B/C/D 2500-ft quadrant of a 5000-ft parent.
+     */
+    private record LidScheme(Character forcedZone, Integer overrideC, double tileFt, boolean quad) {}
+
+    private static final java.util.Map<String, LidScheme> LID_SCHEMES = java.util.Map.of(
+            "FL_Peninsular_2018_D18",                   new LidScheme(null, null, 5000, false),
+            "FL_Peninsular_FDEM_2018_D19_DRRA",         new LidScheme(null, null, 5000, false),
+            "FL_HurricaneMichael_2020_D20",             new LidScheme(null, null, 5000, false),
+            "FL_ManateeCounty_B25",                     new LidScheme(null, null, 5000, false),
+            "FL_Osceola_2015",                          new LidScheme(null, 149767, 2500, true),
+            "FL_Suwannee_River_FL_QL2_LiDAR_FY14_14",   new LidScheme(null, 104051, 5000, false),
+            "FL_MiamiDade_D23",                         new LidScheme('E',  null,   5000, false));
+
+    // ..._LID2019_447196_W   ..._LID2015_060759_E_A   (zone suffix, optional A-D quadrant)
+    private static final Pattern LID_STD =
+            Pattern.compile("_LID\\d{4}_(\\d{4,6})_([EWN])(?:_([A-D]))?\\.laz$");
+    // ..._LID2024_313031_0901   (no zone suffix, trailing delivery code)
+    private static final Pattern LID_NOZONE =
+            Pattern.compile("_LID\\d{4}_(\\d{4,6})(?:_\\d{2,4})?\\.laz$");
+
+    /** Decodes a Florida State Plane LID-gridded name into a footprint, or {@code null}. */
+    static Matched parseLid(String line) {
+        String project = lidProject(line);
+        LidScheme sc = project == null ? null : LID_SCHEMES.get(project);
+        if (sc == null) return null;                          // only confirmed grid origins
+
+        int idx; char zone; Character quad = null;
+        Matcher m = LID_STD.matcher(line);
+        if (m.find()) {
+            idx = Integer.parseInt(m.group(1));
+            zone = m.group(2).charAt(0);
+            if (m.group(3) != null) quad = m.group(3).charAt(0);
+        } else if (sc.forcedZone() != null && (m = LID_NOZONE.matcher(line)).find()) {
+            idx = Integer.parseInt(m.group(1));
+            zone = sc.forcedZone();
+        } else {
+            return null;
+        }
+        if (quad != null && !sc.quad()) return null;          // unexpected quadrant suffix
+
+        ZoneDef z = LID_ZONES.get(zone);
+        if (z == null) return null;
+        int c = sc.overrideC() != null ? sc.overrideC() : z.c();
+        int k = c - idx;
+        if (k <= 0) return null;
+        int row = (k + z.modulus() - 1) / z.modulus();        // ceil(k / modulus)
+        int col = z.modulus() * row - k;
+        if (col < 0 || col >= z.modulus()) return null;
+
+        double e = col * 5000 * US_FOOT, n = row * 5000 * US_FOOT;
+        if (quad != null) {                                   // 2500-ft quadrant of the parent
+            if (quad == 'B' || quad == 'D') e += 2500 * US_FOOT;   // east half
+            if (quad == 'A' || quad == 'B') n += 2500 * US_FOOT;   // north half
+        }
+        return new Matched(line, groupKey(line), z.proj(), e, n, sc.tileFt() * US_FOOT);
+    }
+
+    /** Top-level project encoded in a {@code USGS_LPC_<project>_LID...} filename, or {@code null}. */
+    static String lidProject(String line) {
+        String name = line.substring(line.lastIndexOf('/') + 1);
+        int start = name.startsWith("USGS_LPC_") ? "USGS_LPC_".length() : 0;
+        int lid = name.indexOf("_LID");
+        return lid > start ? name.substring(start, lid) : null;
     }
 
     // ---- Per-project merge: union of grid cells -> WGS84 MULTIPOLYGON ----
@@ -152,29 +349,27 @@ public final class LazNameBounds {
 
     record Polygon(int[][] shell, java.util.List<int[][]> holes) {}
 
-    /** Merged coverage of a project's tiles (possibly mixed UTM zones) as EWKT MULTIPOLYGON. */
+    /** Merged coverage of a project's tiles (possibly mixed projections) as EWKT MULTIPOLYGON. */
     static String mergedWkt(java.util.List<Matched> tiles, double tile) {
-        // A single project may (rarely) mix UTM zones; union each zone separately, then combine.
-        java.util.Map<Integer, java.util.List<Matched>> byZone = new java.util.TreeMap<>();
+        // A project may mix projections (e.g. UTM zones, or State Plane East+West); union each
+        // projection's cells separately on its own grid, then combine into one MULTIPOLYGON.
+        java.util.Map<Proj, java.util.List<Matched>> byProj = new java.util.LinkedHashMap<>();
         for (Matched m : tiles) {
-            byZone.computeIfAbsent(m.tile().zone(), k -> new java.util.ArrayList<>()).add(m);
+            byProj.computeIfAbsent(m.proj(), k -> new java.util.ArrayList<>()).add(m);
         }
         StringBuilder sb = new StringBuilder("SRID=" + WGS84 + ";MULTIPOLYGON (");
         boolean firstPoly = true;
-        for (var ze : byZone.entrySet()) {
-            int zone = ze.getKey();
-            java.util.List<Matched> zt = ze.getValue();
+        for (var pe : byProj.entrySet()) {
+            Proj proj = pe.getKey();
+            java.util.List<Matched> zt = pe.getValue();
             double minE = Double.MAX_VALUE, minN = Double.MAX_VALUE;
-            for (Matched m : zt) {
-                minE = Math.min(minE, m.tile().swEasting());
-                minN = Math.min(minN, m.tile().swNorthing());
-            }
+            for (Matched m : zt) { minE = Math.min(minE, m.swE()); minN = Math.min(minN, m.swN()); }
             java.util.Set<Integer> cells = new java.util.HashSet<>();
             for (Matched m : zt) {
-                int c = (int) Math.round((m.tile().swEasting() - minE) / tile);
-                int r = (int) Math.round((m.tile().swNorthing() - minN) / tile);
+                int c = (int) Math.round((m.swE() - minE) / tile);
+                int r = (int) Math.round((m.swN() - minN) / tile);
                 if (c < 0 || r < 0 || c >= GRID - 1 || r >= GRID - 1) {
-                    System.err.println("  merge: grid too large for " + zt.get(0).project() + ", skipping zone " + zone);
+                    System.err.println("  merge: grid too large for " + zt.get(0).project() + ", skipping a projection");
                     return "SRID=" + WGS84 + ";MULTIPOLYGON EMPTY";
                 }
                 cells.add(c * GRID + r);
@@ -182,7 +377,7 @@ public final class LazNameBounds {
             for (Polygon p : buildPolygons(boundaryRings(cells))) {
                 if (!firstPoly) sb.append(", ");
                 firstPoly = false;
-                appendPolygon(sb, p, minE, minN, tile, zone);
+                appendPolygon(sb, p, minE, minN, tile, proj);
             }
         }
         sb.append(')');
@@ -339,19 +534,19 @@ public final class LazNameBounds {
     }
 
     private static void appendPolygon(StringBuilder sb, Polygon p,
-                                      double minE, double minN, double tile, int zone) {
+                                      double minE, double minN, double tile, Proj proj) {
         sb.append('(');
-        appendRing(sb, p.shell(), minE, minN, tile, zone);
-        for (int[][] h : p.holes()) { sb.append(", "); appendRing(sb, h, minE, minN, tile, zone); }
+        appendRing(sb, p.shell(), minE, minN, tile, proj);
+        for (int[][] h : p.holes()) { sb.append(", "); appendRing(sb, h, minE, minN, tile, proj); }
         sb.append(')');
     }
 
     private static void appendRing(StringBuilder sb, int[][] ring,
-                                   double minE, double minN, double tile, int zone) {
+                                   double minE, double minN, double tile, Proj proj) {
         sb.append('(');
         for (int i = 0; i < ring.length; i++) {
             double e = minE + ring[i][0] * tile, n = minN + ring[i][1] * tile;
-            double[] ll = DtmNameBounds.Utm.toLonLat(e, n, zone);
+            double[] ll = proj.lonLat(e, n);
             if (i > 0) sb.append(", ");
             sb.append(fmt(ll[0])).append(' ').append(fmt(ll[1]));
         }
@@ -360,12 +555,16 @@ public final class LazNameBounds {
 
     // ---- CLI ----
 
-    /** A matched line: its text, its project (first path segment), and the decoded tile. */
-    private record Matched(String line, String project, Tile tile) {}
+    /**
+     * A matched line ready to emit: its text, project, projection, decoded SW corner (metres in
+     * that projection), and a fixed tile size (LID tiles) or {@code null} to derive per project.
+     */
+    record Matched(String line, String project, Proj proj, double swE, double swN, Double fixedTile) {}
 
     public static void main(String[] args) throws IOException {
         Path input = null, output = null, mergedOut = null;
         Double forcedTile = null;
+        String prefix = null;
         for (int i = 0; i < args.length; i++) {
             String a = args[i];
             if (a.equals("--tile")) {
@@ -374,6 +573,9 @@ public final class LazNameBounds {
             } else if (a.equals("--merged")) {
                 if (i + 1 >= args.length) { System.err.println("--merged needs a file path"); System.exit(2); }
                 mergedOut = Path.of(args[++i]);
+            } else if (a.equals("--prefix")) {
+                if (i + 1 >= args.length) { System.err.println("--prefix needs a value"); System.exit(2); }
+                prefix = args[++i].replaceAll("/+$", "");   // base path prepended to the directory
             } else if (input == null) {
                 input = Path.of(a);
             } else if (output == null) {
@@ -386,16 +588,20 @@ public final class LazNameBounds {
         if (input == null) {
             System.err.println("Usage: java com.spotable.LazNameBounds <list.csv> [out.csv] [--tile <metres>] [--merged <file>]");
             System.err.println("  Reads one USGS LPC path per line, writes \"<filename>\",\"SRID=4326;POLYGON ((...))\"");
-            System.err.println("  for MGRS-gridded names (e.g. ..._17RNL070510.laz). Other forms are skipped.");
+            System.err.println("  for MGRS-gridded names (e.g. ..._17RNL070510.laz) and confirmed Florida State");
+            System.err.println("  Plane LID-gridded names (..._LID2019_447196_W.laz, North/Lambert _N, Osceola");
+            System.err.println("  quadrants _E_A, MiamiDade ..._313031_0901). Other forms are skipped.");
             System.err.println("  Tile size is derived per project from the grid step in the list,");
             System.err.println("  unless --tile forces a fixed size (metres) for every tile.");
-            System.err.println("  --merged  also write one row per project: \"<project>\",\"SRID=4326;MULTIPOLYGON(...)\"");
-            System.err.println("            (the union of that project's tiles, gaps preserved, collinear vertices removed).");
+            System.err.println("  --merged  also write one row per sub-project:");
+            System.err.println("            \"<project>\",\"<directory>\",\"<EPSG>\",\"<horizontal CRS>\",\"SRID=4326;MULTIPOLYGON(...)\"");
+            System.err.println("            (the union of that group's tiles, gaps preserved, collinear vertices removed).");
+            System.err.println("  --prefix  base path (e.g. s3://bucket/point-cloud/us) prepended to the directory column.");
             System.exit(2);
             return;
         }
 
-        // Pass 1: collect the MGRS-matched lines (only ~thousands match, so keep them in memory).
+        // Pass 1: collect matched lines (only ~thousands match, so keep them in memory).
         java.util.List<Matched> matched = new java.util.ArrayList<>();
         long skipped = 0;
         try (BufferedReader in = Files.newBufferedReader(input, StandardCharsets.UTF_8)) {
@@ -404,8 +610,14 @@ public final class LazNameBounds {
                 line = line.strip();
                 if (line.isEmpty()) continue;
                 Tile t = parse(line);
-                if (t == null) { skipped++; continue; }
-                matched.add(new Matched(line, project(line), t));
+                if (t != null) {
+                    matched.add(new Matched(line, groupKey(line),
+                            Proj.utm(t.zone()), t.swEasting(), t.swNorthing(), null));
+                    continue;
+                }
+                Matched lid = parseLid(line);
+                if (lid != null) { matched.add(lid); continue; }
+                skipped++;
             }
         }
 
@@ -420,7 +632,8 @@ public final class LazNameBounds {
                 double tile = forcedTile != null
                         ? forcedTile
                         : tileByProject.getOrDefault(mtc.project(), DEFAULT_TILE);
-                String row = DtmNameBounds.csvRow(mtc.line(), toWgs84Wkt(mtc.tile(), tile));
+                String row = DtmNameBounds.csvRow(mtc.line(),
+                        toWgs84Wkt(mtc.proj(), mtc.swE(), mtc.swN(), tile));
                 if (out != null) { out.write(row); out.write('\n'); }
                 else System.out.println(row);
             }
@@ -434,17 +647,28 @@ public final class LazNameBounds {
         }
 
         if (mergedOut != null) {
-            // Group tiles by project, derive its merged coverage, one CSV row per project.
+            // Group tiles by sub-project, derive its merged coverage, one CSV row per group.
+            // Columns: group, directory, horizontal CRS, merged WGS84 geometry.
             java.util.Map<String, java.util.List<Matched>> byProject = new java.util.TreeMap<>();
             for (Matched m : matched) {
                 byProject.computeIfAbsent(m.project(), k -> new java.util.ArrayList<>()).add(m);
             }
             try (Writer out = Files.newBufferedWriter(mergedOut, StandardCharsets.UTF_8)) {
+                out.write(DtmNameBounds.csvRow(
+                        "project", "directory", "horizontal_epsg", "horizontal_projection", "geometry"));
+                out.write('\n');
                 for (var e : byProject.entrySet()) {
+                    java.util.List<Matched> g = e.getValue();
                     double tile = forcedTile != null
                             ? forcedTile
                             : tileByProject.getOrDefault(e.getKey(), DEFAULT_TILE);
-                    out.write(DtmNameBounds.csvRow(e.getKey(), mergedWkt(e.getValue(), tile)));
+                    String directory = groupDir(g.get(0).line());
+                    if (prefix != null) directory = prefix + "/" + directory.replaceAll("^/+", "");
+                    java.util.TreeSet<String> epsg = new java.util.TreeSet<>();
+                    java.util.TreeSet<String> crs = new java.util.TreeSet<>();
+                    for (Matched m : g) { epsg.add(m.proj().epsg()); crs.add(m.proj().crs()); }
+                    out.write(DtmNameBounds.csvRow(e.getKey(), directory,
+                            String.join("; ", epsg), String.join("; ", crs), mergedWkt(g, tile)));
                     out.write('\n');
                 }
             }
@@ -452,10 +676,30 @@ public final class LazNameBounds {
         }
     }
 
-    /** Project = first path segment (everything before the first {@code /}). */
-    private static String project(String line) {
-        int slash = line.indexOf('/');
-        return slash < 0 ? line : line.substring(0, slash);
+    /**
+     * Grouping key for the merge: the directory that contains the {@code LAZ}/{@code TIFF} folder
+     * (the survey sub-project, e.g. {@code FL_Peninsular_FDEM_Alachua_2018}). This is taken from
+     * the path, not the filename, so distinct sub-projects under one collection stay separate and
+     * any bucket/prefix in the path is ignored. Falls back to the file's parent directory.
+     */
+    static String groupKey(String line) {
+        String[] p = line.split("/");
+        for (int i = p.length - 1; i > 0; i--) {
+            if (p[i].equalsIgnoreCase("LAZ") || p[i].equalsIgnoreCase("TIFF")) return p[i - 1];
+        }
+        return p.length >= 2 ? p[p.length - 2] : line;
+    }
+
+    /** Full directory path of the group (everything up to the {@code LAZ}/{@code TIFF} folder). */
+    static String groupDir(String line) {
+        String[] p = line.split("/");
+        for (int i = p.length - 1; i > 0; i--) {
+            if (p[i].equalsIgnoreCase("LAZ") || p[i].equalsIgnoreCase("TIFF")) {
+                return String.join("/", java.util.Arrays.copyOfRange(p, 0, i));
+            }
+        }
+        int slash = line.lastIndexOf('/');
+        return slash < 0 ? "" : line.substring(0, slash);
     }
 
     private static final double DEFAULT_TILE = 1500.0;
@@ -466,13 +710,17 @@ public final class LazNameBounds {
      * axes fall back to {@link #DEFAULT_TILE}.
      */
     private static java.util.Map<String, Double> deriveTileSizes(java.util.List<Matched> matched) {
+        java.util.Map<String, Double> out = new java.util.HashMap<>();
         java.util.Map<String, java.util.TreeSet<Double>> e = new java.util.HashMap<>();
         java.util.Map<String, java.util.TreeSet<Double>> n = new java.util.HashMap<>();
         for (Matched m : matched) {
-            e.computeIfAbsent(m.project(), k -> new java.util.TreeSet<>()).add(m.tile().swEasting());
-            n.computeIfAbsent(m.project(), k -> new java.util.TreeSet<>()).add(m.tile().swNorthing());
+            if (m.fixedTile() != null) {            // LID tiles carry a known size
+                out.putIfAbsent(m.project(), m.fixedTile());
+                continue;
+            }
+            e.computeIfAbsent(m.project(), k -> new java.util.TreeSet<>()).add(m.swE());
+            n.computeIfAbsent(m.project(), k -> new java.util.TreeSet<>()).add(m.swN());
         }
-        java.util.Map<String, Double> out = new java.util.HashMap<>();
         for (String p : e.keySet()) {
             double step = Math.min(minGap(e.get(p)), minGap(n.get(p)));
             out.put(p, Double.isFinite(step) ? step : DEFAULT_TILE);
