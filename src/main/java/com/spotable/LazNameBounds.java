@@ -587,14 +587,14 @@ public final class LazNameBounds {
         }
         if (input == null) {
             System.err.println("Usage: java com.spotable.LazNameBounds <list.csv> [out.csv] [--tile <metres>] [--merged <file>]");
-            System.err.println("  Reads one USGS LPC path per line, writes \"<filename>\",\"SRID=4326;POLYGON ((...))\"");
+            System.err.println("  Reads one USGS LPC path per line, writes \"<project>\",\"<filename>\",\"SRID=4326;POLYGON ((...))\"");
             System.err.println("  for MGRS-gridded names (e.g. ..._17RNL070510.laz) and confirmed Florida State");
             System.err.println("  Plane LID-gridded names (..._LID2019_447196_W.laz, North/Lambert _N, Osceola");
             System.err.println("  quadrants _E_A, MiamiDade ..._313031_0901). Other forms are skipped.");
             System.err.println("  Tile size is derived per project from the grid step in the list,");
             System.err.println("  unless --tile forces a fixed size (metres) for every tile.");
             System.err.println("  --merged  also write one row per sub-project:");
-            System.err.println("            \"<project>\",\"<directory>\",\"<EPSG>\",\"<horizontal CRS>\",\"SRID=4326;MULTIPOLYGON(...)\"");
+            System.err.println("            \"<project>\",\"<directory>\",\"<files>\",\"<year>\",\"<EPSG>\",\"<horizontal CRS>\",\"SRID=4326;MULTIPOLYGON(...)\"");
             System.err.println("            (the union of that group's tiles, gaps preserved, collinear vertices removed).");
             System.err.println("  --prefix  base path (e.g. s3://bucket/point-cloud/us) prepended to the directory column.");
             System.exit(2);
@@ -628,11 +628,13 @@ public final class LazNameBounds {
 
         try (Writer out = output != null
                 ? Files.newBufferedWriter(output, StandardCharsets.UTF_8) : null) {
+            String header = DtmNameBounds.csvRow("project", "filename", "geometry");
+            if (out != null) { out.write(header); out.write('\n'); } else System.out.println(header);
             for (Matched mtc : matched) {
                 double tile = forcedTile != null
                         ? forcedTile
                         : tileByProject.getOrDefault(mtc.project(), DEFAULT_TILE);
-                String row = DtmNameBounds.csvRow(mtc.line(),
+                String row = DtmNameBounds.csvRow(mtc.project(), mtc.line(),
                         toWgs84Wkt(mtc.proj(), mtc.swE(), mtc.swN(), tile));
                 if (out != null) { out.write(row); out.write('\n'); }
                 else System.out.println(row);
@@ -654,8 +656,8 @@ public final class LazNameBounds {
                 byProject.computeIfAbsent(m.project(), k -> new java.util.ArrayList<>()).add(m);
             }
             try (Writer out = Files.newBufferedWriter(mergedOut, StandardCharsets.UTF_8)) {
-                out.write(DtmNameBounds.csvRow(
-                        "project", "directory", "horizontal_epsg", "horizontal_projection", "geometry"));
+                out.write(DtmNameBounds.csvRow("project", "directory", "files", "year",
+                        "horizontal_epsg", "horizontal_projection", "geometry"));
                 out.write('\n');
                 for (var e : byProject.entrySet()) {
                     java.util.List<Matched> g = e.getValue();
@@ -668,6 +670,7 @@ public final class LazNameBounds {
                     java.util.TreeSet<String> crs = new java.util.TreeSet<>();
                     for (Matched m : g) { epsg.add(m.proj().epsg()); crs.add(m.proj().crs()); }
                     out.write(DtmNameBounds.csvRow(e.getKey(), directory,
+                            Integer.toString(g.size()), year(e.getKey(), g.get(0).line()),
                             String.join("; ", epsg), String.join("; ", crs), mergedWkt(g, tile)));
                     out.write('\n');
                 }
@@ -700,6 +703,21 @@ public final class LazNameBounds {
         }
         int slash = line.lastIndexOf('/');
         return slash < 0 ? "" : line.substring(0, slash);
+    }
+
+    /** A plausible survey year (1900–2099) standing alone in a digit run. */
+    private static final Pattern YEAR = Pattern.compile("(?<!\\d)(19\\d{2}|20\\d{2})(?!\\d)");
+
+    /**
+     * Survey year for a group, read from the project name first (e.g. {@code 2017FortDrum},
+     * {@code FL_Peninsular_2018_D18}) and falling back to the path (e.g. {@code _LID2019_}).
+     * Returns {@code ""} if no year-like token is present.
+     */
+    static String year(String project, String line) {
+        Matcher m = YEAR.matcher(project);
+        if (m.find()) return m.group(1);
+        m = YEAR.matcher(line);
+        return m.find() ? m.group(1) : "";
     }
 
     private static final double DEFAULT_TILE = 1500.0;
