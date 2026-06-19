@@ -111,7 +111,7 @@ public class DtmBoundsTest {
         assertEquals(Integer.valueOf(6441), d.epsg);
     }
 
-    /** Output mirrors LazBounds: a bare bbox WKT carrying the SRID. */
+    /** Output mirrors LazBinaryReader: a bare bbox WKT carrying the SRID. */
     @Test
     public void emitsEwktGeometry() throws Exception {
         DtmBounds d = readBytes(sampleGeoTiff());

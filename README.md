@@ -153,6 +153,6 @@ are also skipped. The run prints the converted/skipped counts to stderr.
 
 ## Related tools (in the same jar)
 
-- `com.spotable.LazBounds` — read the true bounding box / CRS / point count from one or more
+- `com.spotable.LazBinaryReader` — read the true bounding box / CRS / point count from one or more
   LAS/LAZ files (local, directory, glob, or `s3://`), via ranged GETs. Used by step 2.
 - `com.spotable.DtmNameBounds` / `com.spotable.DtmBounds` — the DTM (raster) counterparts.

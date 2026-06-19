@@ -30,7 +30,7 @@ import software.amazon.awssdk.services.s3.model.S3Object;
 
 /**
  * Reads the georeferenced bounding box and raster metadata from a (Geo)TIFF DTM,
- * the raster counterpart to {@link LazBounds}.
+ * the raster counterpart to {@link LazBinaryReader}.
  * <p>
  * Only the TIFF header, the first Image File Directory (IFD), and the handful of
  * georeferencing tags it points at are read — never the pixel data. A TIFF's IFD
@@ -40,7 +40,7 @@ import software.amazon.awssdk.services.s3.model.S3Object;
  * <p>
  * The footprint is derived from {@code ModelPixelScaleTag}+{@code ModelTiepointTag}
  * (or {@code ModelTransformationTag}); the CRS from the same GeoTIFF {@code GeoKeyDirectoryTag}
- * that {@link LazBounds} reads. Like {@link LazBounds}, it prints two CSV fields per
+ * that {@link LazBinaryReader} reads. Like {@link LazBinaryReader}, it prints two CSV fields per
  * file — the path and the box as georeferenced EWKT ({@code SRID=<epsg>;POLYGON(...)}).
  * BigTIFF (version 43) is supported alongside classic TIFF.
  */
@@ -343,7 +343,7 @@ public class DtmBounds {
         };
     }
 
-    // ---- CRS helpers (shared shape with LazBounds) ----
+    // ---- CRS helpers (shared shape with LazBinaryReader) ----
 
     /** Parses a GeoKeyDirectory short array into {@code [projectedEpsg, geographicEpsg]} (0 if absent). */
     private static int[] geoKeyEpsgs(int[] gk) {
@@ -522,7 +522,7 @@ public class DtmBounds {
         }
     }
 
-    // ---- Source resolution (local + S3, mirroring LazBounds) ----
+    // ---- Source resolution (local + S3, mirroring LazBinaryReader) ----
 
     static List<Source> collectSources(String[] args, S3Client s3) throws IOException {
         Map<String, Source> sources = new TreeMap<>();   // sorted + de-duplicated

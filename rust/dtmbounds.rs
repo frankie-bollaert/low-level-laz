@@ -938,7 +938,7 @@ mod tests {
         assert_eq!(d.epsg, Some(6441));
     }
 
-    /// Output mirrors LazBounds: a bare bbox WKT carrying the SRID.
+    /// Output mirrors LazBinaryReader: a bare bbox WKT carrying the SRID.
     #[test]
     fn emits_ewkt_geometry() {
         let d = read_bytes(sample_geotiff());

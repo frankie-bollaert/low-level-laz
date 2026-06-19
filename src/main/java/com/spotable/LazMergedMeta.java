@@ -135,7 +135,7 @@ public final class LazMergedMeta {
             int slash = key.indexOf('/');
             if (slash < 0) continue;
             try {
-                LazBounds b = LazBounds.readS3(s3, key.substring(0, slash), key.substring(slash + 1));
+                LazBinaryReader b = LazBinaryReader.readS3(s3, key.substring(0, slash), key.substring(slash + 1));
                 double area = b.areaSqMetres();
                 if (b.pointCount > 0 && area > 0) densities.add(b.pointCount / area);
                 if (b.verticalEpsg != null) vEpsgs.add("EPSG:" + b.verticalEpsg);

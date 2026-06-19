@@ -43,7 +43,7 @@ import software.amazon.awssdk.services.s3.model.S3Object;
  * (GeoTIFF GeoKeys or an OGC WKT VLR), is also extracted so the bounding box can
  * be emitted as georeferenced EWKT ({@code SRID=<epsg>;POLYGON(...)}).
  */
-public class LazBounds {
+public class LazBinaryReader {
 
     // Byte offsets of fields within the public header block.
     private static final int OFF_SIGNATURE = 0;          // "LASF" (4 bytes)
@@ -106,7 +106,7 @@ public class LazBounds {
     /** Human-readable vertical CRS name (e.g. {@code NAVD88 height (m)}), or {@code null}. */
     public final String verticalCrs;
 
-    private LazBounds(double minX, double maxX, double minY, double maxY, Integer epsg,
+    private LazBinaryReader(double minX, double maxX, double minY, double maxY, Integer epsg,
                       long pointCount, double unitMetres, Integer verticalEpsg, String verticalCrs) {
         this.minX = minX;
         this.maxX = maxX;
@@ -153,16 +153,16 @@ public class LazBounds {
     // ---- Reading ----
 
     /** Reads the bounding box (and CRS, if present) from a local LAS/LAZ file. */
-    public static LazBounds read(Path file) throws IOException {
+    public static LazBinaryReader read(Path file) throws IOException {
         return read(new LocalSource(file));
     }
 
     /** Reads header bounds/CRS/point-count from an S3 object via a single ranged GET. */
-    public static LazBounds readS3(S3Client s3, String bucket, String key) throws IOException {
+    public static LazBinaryReader readS3(S3Client s3, String bucket, String key) throws IOException {
         return read(new S3Source(s3, bucket, key));
     }
 
-    static LazBounds read(Source source) throws IOException {
+    static LazBinaryReader read(Source source) throws IOException {
         byte[] buf = readPrefix(source, INITIAL_READ);
         if (buf.length < MIN_HEADER_SIZE) {
             throw new IllegalArgumentException("Too short to contain a LAS header: " + source.label());
@@ -202,7 +202,7 @@ public class LazBounds {
             vert = findVertical(buf, headerSize, vlrEnd, numVlrs);
         }
 
-        return new LazBounds(minX, maxX, minY, maxY, epsg, pointCount, unitMetres,
+        return new LazBinaryReader(minX, maxX, minY, maxY, epsg, pointCount, unitMetres,
                 vert.epsg(), vert.name());
     }
 
@@ -520,7 +520,7 @@ public class LazBounds {
         }
 
         if (inputs.isEmpty()) {
-            System.err.println("Usage: java com.spotable.LazBounds -i <file|dir|glob|s3-uri> [-i ...] [-o out.csv]");
+            System.err.println("Usage: java com.spotable.LazBinaryReader -i <file|dir|glob|s3-uri> [-i ...] [-o out.csv]");
             System.err.println("  -i/--input  (repeatable) source to read:");
             System.err.println("    Local: a LAS/LAZ file, a directory (recursive *.las/*.laz),");
             System.err.println("           or a glob such as 'data/**/*.laz'.");
@@ -650,7 +650,7 @@ public class LazBounds {
             listS3(s3, bucket, prefix, k -> matcher.matches(Path.of(k)), out);
         } else if (key.isEmpty() || key.endsWith("/")) {
             // Prefix ("directory") listing: every *.las/*.laz under it.
-            listS3(s3, bucket, key, LazBounds::isLasLaz, out);
+            listS3(s3, bucket, key, LazBinaryReader::isLasLaz, out);
         } else {
             // Single object.
             out.put("s3://" + bucket + "/" + key, new S3Source(s3, bucket, key));

@@ -22,7 +22,7 @@ public class AppTest
     }
 
     private static Integer wktEpsg(String wkt) throws Exception {
-        Method m = LazBounds.class.getDeclaredMethod("wktEpsg", String.class);
+        Method m = LazBinaryReader.class.getDeclaredMethod("wktEpsg", String.class);
         m.setAccessible(true);
         return (Integer) m.invoke(null, wkt);
     }
@@ -78,12 +78,12 @@ public class AppTest
     public void csvRowQuotesFields() {
         assertEquals(
             "\"s3://bucket/tile.laz\",\"SRID=6441;POLYGON ((1 2, 3 4))\"",
-            LazBounds.csvRow("s3://bucket/tile.laz", "SRID=6441;POLYGON ((1 2, 3 4))"));
+            LazBinaryReader.csvRow("s3://bucket/tile.laz", "SRID=6441;POLYGON ((1 2, 3 4))"));
     }
 
     /** Embedded double quotes are doubled per RFC 4180. */
     @Test
     public void csvRowEscapesEmbeddedQuotes() {
-        assertEquals("\"a \"\"b\"\" c\"", LazBounds.csvRow("a \"b\" c"));
+        assertEquals("\"a \"\"b\"\" c\"", LazBinaryReader.csvRow("a \"b\" c"));
     }
 }
