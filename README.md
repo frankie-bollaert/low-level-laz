@@ -67,8 +67,9 @@ java -cp "$JAR" com.spotable.LazNameBounds \
 | flag | required | meaning |
 | --- | --- | --- |
 | `--input` (`-i`) | yes | list of object paths, one per line |
-| `--output` (`-o`) | no | per-tile CSV (default: stdout) |
+| `--output` (`-o`) | no | per-tile CSV (default: stdout, unless `--partitioned` is given) |
 | `--merged` | no | also write the per-project merged CSV to this path |
+| `--partitioned` | no | also write the per-tile rows split by project, one `<dir>/<project>.csv` per project |
 | `--tile` | no | force a fixed tile size in metres (default: inferred per project from the grid step) |
 | `--prefix` | no | base path prepended to the `directory` column |
 

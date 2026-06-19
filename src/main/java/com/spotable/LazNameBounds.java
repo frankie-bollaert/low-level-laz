@@ -752,8 +752,14 @@ public final class LazNameBounds {
         return args[i];
     }
 
+    /** A filesystem-safe form of a project key (non [A-Za-z0-9._-] characters become '_'). */
+    private static String safeFileName(String project) {
+        String s = project.replaceAll("[^A-Za-z0-9._-]", "_");
+        return s.isEmpty() ? "_" : s;
+    }
+
     public static void main(String[] args) throws IOException {
-        Path input = null, output = null, mergedOut = null;
+        Path input = null, output = null, mergedOut = null, partitionDir = null;
         Double forcedTile = null;
         String prefix = null;
         for (int i = 0; i < args.length; i++) {
@@ -762,6 +768,7 @@ public final class LazNameBounds {
                 case "--input", "-i" -> input = Path.of(requireArg(args, ++i, a));
                 case "--output", "-o" -> output = Path.of(requireArg(args, ++i, a));
                 case "--merged" -> mergedOut = Path.of(requireArg(args, ++i, a));
+                case "--partitioned" -> partitionDir = Path.of(requireArg(args, ++i, a));
                 case "--tile" -> forcedTile = Double.parseDouble(requireArg(args, ++i, a));
                 case "--prefix" -> prefix = requireArg(args, ++i, a).replaceAll("/+$", "");
                 default -> { System.err.println("Unknown argument: " + a); System.exit(2); }
@@ -769,16 +776,20 @@ public final class LazNameBounds {
         }
         if (input == null) {
             System.err.println("Usage: java com.spotable.LazNameBounds --input <list.csv> [--output <bounds.csv>]");
-            System.err.println("                                       [--merged <file>] [--tile <metres>] [--prefix <base>]");
+            System.err.println("                                       [--merged <file>] [--partitioned <dir>]");
+            System.err.println("                                       [--tile <metres>] [--prefix <base>]");
             System.err.println("  --input   (-i) list of USGS LPC paths, one per line (required).");
             System.err.println("  --output  (-o) per-tile CSV \"<project>\",\"<filename>\",\"SRID=4326;POLYGON ((...))\"");
-            System.err.println("                 (default: stdout). Decodes MGRS names (..._17RNL070510.laz), confirmed");
-            System.err.println("                 Florida State Plane LID names (..._LID2019_447196_W.laz, _N, _E_A, ...),");
-            System.err.println("                 e/n grids (..._e0853n0913.laz CONUS Albers, ..._w314000n3291500.laz UTM),");
-            System.err.println("                 and State Plane names without the LID token. Other forms are skipped.");
+            System.err.println("                 (default: stdout, unless --partitioned is given). Decodes MGRS names");
+            System.err.println("                 (..._17RNL070510.laz), confirmed Florida State Plane LID names");
+            System.err.println("                 (..._LID2019_447196_W.laz, _N, _E_A, ...), e/n grids (..._e0853n0913.laz");
+            System.err.println("                 CONUS Albers, ..._w314000n3291500.laz UTM), and State Plane names");
+            System.err.println("                 without the LID token. Other forms are skipped.");
             System.err.println("  --merged  also write one row per sub-project:");
             System.err.println("            \"<project>\",\"<directory>\",\"<files>\",\"<year>\",\"<EPSG>\",\"<horizontal CRS>\",\"SRID=4326;MULTIPOLYGON(...)\"");
             System.err.println("            (the union of that group's tiles, gaps preserved, collinear vertices removed).");
+            System.err.println("  --partitioned  also write the per-tile rows split by project, one CSV per project");
+            System.err.println("                 (<dir>/<project>.csv, each with the same header) into <dir>.");
             System.err.println("  --tile    force a fixed tile size (metres) for every tile (default: derived per project).");
             System.err.println("  --prefix  base path (e.g. s3://bucket/point-cloud/us) prepended to the directory column.");
             System.exit(2);
@@ -814,10 +825,16 @@ public final class LazNameBounds {
                 ? java.util.Map.of()
                 : deriveTileSizes(matched);
 
+        // Per-tile output: a single CSV (--output) and/or one CSV per project (--partitioned).
+        // Falls back to stdout only when neither destination is given.
+        String header = TifNameBounds.csvRow("project", "filename", "geometry");
+        boolean toStdout = output == null && partitionDir == null;
+        if (partitionDir != null) Files.createDirectories(partitionDir);
+        java.util.Map<String, Writer> partWriters = new java.util.HashMap<>();
         try (Writer out = output != null
                 ? Files.newBufferedWriter(output, StandardCharsets.UTF_8) : null) {
-            String header = TifNameBounds.csvRow("project", "filename", "geometry");
-            if (out != null) { out.write(header); out.write('\n'); } else System.out.println(header);
+            if (out != null) { out.write(header); out.write('\n'); }
+            else if (toStdout) System.out.println(header);
             for (Matched mtc : matched) {
                 double tile = forcedTile != null
                         ? forcedTile
@@ -825,8 +842,24 @@ public final class LazNameBounds {
                 String row = TifNameBounds.csvRow(mtc.project(), mtc.line(),
                         toWgs84Wkt(mtc.proj(), mtc.swE(), mtc.swN(), tile));
                 if (out != null) { out.write(row); out.write('\n'); }
-                else System.out.println(row);
+                else if (toStdout) System.out.println(row);
+                if (partitionDir != null) {
+                    Writer pw = partWriters.get(mtc.project());
+                    if (pw == null) {
+                        pw = Files.newBufferedWriter(
+                                partitionDir.resolve(safeFileName(mtc.project()) + ".csv"),
+                                StandardCharsets.UTF_8);
+                        pw.write(header); pw.write('\n');
+                        partWriters.put(mtc.project(), pw);
+                    }
+                    pw.write(row); pw.write('\n');
+                }
             }
+        } finally {
+            for (Writer pw : partWriters.values()) pw.close();
+        }
+        if (partitionDir != null) {
+            System.err.println("Wrote " + partWriters.size() + " per-project files to " + partitionDir);
         }
         System.err.println("Wrote " + matched.size() + " rows, skipped " + skipped + " non-MGRS names");
         if (forcedTile == null) {
