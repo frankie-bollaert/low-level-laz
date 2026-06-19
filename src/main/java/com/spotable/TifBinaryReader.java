@@ -19,8 +19,6 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.function.Predicate;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 import software.amazon.awssdk.services.s3.S3Client;
@@ -59,16 +57,7 @@ public class TifBinaryReader {
     private static final int TAG_GEO_KEY_DIRECTORY = 34735;     // shorts
     private static final int TAG_GEO_ASCII_PARAMS = 34737;      // ASCII (citation/WKT)
 
-    // GeoKey ids holding an EPSG code directly (TIFFTagLocation == 0).
-    private static final int KEY_PROJECTED_CS = 3072;   // ProjectedCSTypeGeoKey
-    private static final int KEY_GEOGRAPHIC_CS = 2048;  // GeographicTypeGeoKey
-    private static final int KEY_PROJ_LINEAR_UNITS = 3076;  // ProjLinearUnitsGeoKey (EPSG UoM code)
-    private static final int KEY_VERTICAL_CS = 4096;    // VerticalCSTypeGeoKey
-    private static final int GEOKEY_UNDEFINED = 0;
-    private static final int GEOKEY_USER_DEFINED = 32767;
-    // EPSG unit-of-measure codes, in metres per unit.
-    private static final int UOM_METRE = 9001, UOM_FOOT = 9002, UOM_US_FOOT = 9003;
-    private static final double US_SURVEY_FOOT = 1200.0 / 3937.0;
+    // GeoKey ids and unit handling live in GeoCrs (shared with LazBinaryReader).
     // Names for the vertical CRS codes seen in these DEMs (GeoTIFF rarely carries a vertical name).
     private static final java.util.Map<Integer, String> VERTICAL_NAMES = java.util.Map.of(
             5703, "NAVD88 height (m)", 6360, "NAVD88 height (ftUS)", 5714, "MSL height (m)");
@@ -76,9 +65,6 @@ public class TifBinaryReader {
     // How far we'll read at a single offset (IFD window, and any tag payload).
     private static final int READ_WINDOW = 64 * 1024;
     private static final int READ_CAP = 16 * 1024 * 1024;
-
-    private static final Pattern WKT_EPSG = Pattern.compile(
-            "(?i)(?:AUTHORITY|ID)\\s*\\[\\s*\"EPSG\"\\s*,\\s*\"?(\\d+)\"?\\s*\\]");
 
     public final double minX, maxX, minY, maxY;
     /** EPSG code of the horizontal CRS, or {@code null} if none could be determined. */
@@ -185,20 +171,20 @@ public class TifBinaryReader {
         // CRS from the GeoKey directory; fall back to an EPSG embedded in a WKT citation
         // (used by GeoTIFFs with a user-defined CRS).
         int[] gk = tiff.shorts(TAG_GEO_KEY_DIRECTORY);
-        int[] codes = geoKeyEpsgs(gk);
+        int[] codes = GeoCrs.geoKeyEpsgs(gk);
         Integer epsg = codes[0] != 0 ? codes[0] : (codes[1] != 0 ? codes[1] : null);
         if (epsg == null) {
             String citation = tiff.ascii(TAG_GEO_ASCII_PARAMS);
-            if (looksLikeWkt(citation)) epsg = wktEpsg(citation);
+            if (GeoCrs.looksLikeWkt(citation)) epsg = GeoCrs.horizontalEpsg(citation);
         }
 
         // Ground sample distance (pixel size) in metres, honouring the projected linear unit.
         double pixel = pixelSize(tiff);
-        double unit = unitMetres(geoKeyValue(gk, KEY_PROJ_LINEAR_UNITS));
+        double unit = GeoCrs.metresPerUnit(GeoCrs.geoKey(gk, GeoCrs.KEY_PROJ_LINEAR_UNITS));
         double resolution = Double.isNaN(pixel) ? Double.NaN : pixel * unit;
 
         // Vertical CRS, when the DEM declares one (most do not).
-        int vCode = geoKeyValue(gk, KEY_VERTICAL_CS);
+        int vCode = GeoCrs.geoKey(gk, GeoCrs.KEY_VERTICAL_CS);
         Integer verticalEpsg = vCode > 0 ? vCode : null;
         String verticalCrs = verticalEpsg == null ? null
                 : VERTICAL_NAMES.getOrDefault(verticalEpsg, "EPSG:" + verticalEpsg);
@@ -214,30 +200,6 @@ public class TifBinaryReader {
         double[] scale = tiff.doubles(TAG_MODEL_PIXEL_SCALE);
         if (scale != null && scale.length >= 1) return scale[0];
         return Double.NaN;
-    }
-
-    /** Metres per CRS unit from a ProjLinearUnitsGeoKey EPSG UoM code (defaults to metre). */
-    private static double unitMetres(int uom) {
-        return switch (uom) {
-            case UOM_FOOT -> 0.3048;
-            case UOM_US_FOOT -> US_SURVEY_FOOT;
-            default -> 1.0;   // UOM_METRE, undefined, or absent
-        };
-    }
-
-    /** First directly-encoded value for {@code keyId} in the GeoKey directory, or 0 if absent. */
-    private static int geoKeyValue(int[] gk, int keyId) {
-        if (gk == null || gk.length < 4) return 0;
-        int numKeys = gk[3];
-        for (int k = 0; k < numKeys; k++) {
-            int base = 4 + k * 4;
-            if (base + 4 > gk.length) break;
-            if (gk[base] == keyId && gk[base + 1] == 0) {
-                int value = gk[base + 3];
-                return value == GEOKEY_UNDEFINED || value == GEOKEY_USER_DEFINED ? 0 : value;
-            }
-        }
-        return 0;
     }
 
     private static ByteOrder byteOrder(byte[] head, String label) {
@@ -410,82 +372,6 @@ public class TifBinaryReader {
             case 5, 10, 12, 16, 17, 18 -> 8;  // RATIONAL, SRATIONAL, DOUBLE, LONG8, SLONG8, IFD8
             default -> 0;
         };
-    }
-
-    // ---- CRS helpers (shared shape with LazBinaryReader) ----
-
-    /** Parses a GeoKeyDirectory short array into {@code [projectedEpsg, geographicEpsg]} (0 if absent). */
-    private static int[] geoKeyEpsgs(int[] gk) {
-        int projected = 0, geographic = 0;
-        if (gk != null && gk.length >= 4) {
-            int numKeys = gk[3];
-            for (int k = 0; k < numKeys; k++) {
-                int base = 4 + k * 4;
-                if (base + 4 > gk.length) break;
-                int keyId = gk[base], location = gk[base + 1], value = gk[base + 3];
-                if (location != 0 || value == GEOKEY_UNDEFINED || value == GEOKEY_USER_DEFINED) continue;
-                if (keyId == KEY_PROJECTED_CS) projected = value;
-                else if (keyId == KEY_GEOGRAPHIC_CS) geographic = value;
-            }
-        }
-        return new int[] { projected, geographic };
-    }
-
-    private static boolean looksLikeWkt(String s) {
-        if (s == null) return false;
-        String u = s.toUpperCase(Locale.ROOT);
-        return u.contains("PROJCS") || u.contains("GEOGCS") || u.contains("COMPD_CS")
-                || u.contains("PROJCRS") || u.contains("GEOGCRS") || u.contains("COMPOUNDCRS");
-    }
-
-    /** EPSG of the horizontal CRS in an OGC WKT string (projected, else geographic), or null. */
-    private static Integer wktEpsg(String wkt) {
-        String horizontal = firstBracketedSpan(wkt, "PROJCS", "PROJCRS");
-        if (horizontal == null) {
-            horizontal = firstBracketedSpan(wkt, "GEOGCS", "GEOGCRS", "GEODCRS");
-        }
-        Integer epsg = horizontal != null ? lastEpsg(horizontal) : null;
-        return epsg != null ? epsg : lastEpsg(wkt);
-    }
-
-    private static Integer lastEpsg(String wkt) {
-        Matcher m = WKT_EPSG.matcher(wkt);
-        Integer last = null;
-        while (m.find()) last = Integer.valueOf(m.group(1));
-        return last;
-    }
-
-    private static String firstBracketedSpan(String wkt, String... keywords) {
-        String upper = wkt.toUpperCase(Locale.ROOT);
-        for (String kw : keywords) {
-            for (int idx = upper.indexOf(kw); idx >= 0; idx = upper.indexOf(kw, idx + 1)) {
-                boolean leftOk = idx == 0 || !Character.isLetterOrDigit(upper.charAt(idx - 1));
-                int open = idx + kw.length();
-                while (open < upper.length() && Character.isWhitespace(upper.charAt(open))) open++;
-                if (leftOk && open < upper.length()
-                        && (upper.charAt(open) == '[' || upper.charAt(open) == '(')) {
-                    return balancedSpan(wkt, open);
-                }
-            }
-        }
-        return null;
-    }
-
-    private static String balancedSpan(String s, int open) {
-        int depth = 0;
-        boolean inString = false;
-        for (int i = open; i < s.length(); i++) {
-            char c = s.charAt(i);
-            if (c == '"') {
-                inString = !inString;
-            } else if (!inString) {
-                if (c == '[' || c == '(') depth++;
-                else if (c == ']' || c == ')') {
-                    if (--depth == 0) return s.substring(open, i + 1);
-                }
-            }
-        }
-        return s.substring(open);
     }
 
     // ---- Output ----

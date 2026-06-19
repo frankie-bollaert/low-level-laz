@@ -19,7 +19,6 @@ import java.util.Map;
 import java.util.TreeMap;
 import java.util.function.Predicate;
 import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 import software.amazon.awssdk.services.s3.S3Client;
@@ -75,25 +74,7 @@ public class LazBinaryReader {
     private static final int GEOKEY_DIRECTORY_RECORD_ID = 34735; // GeoTIFF GeoKeyDirectoryTag
     private static final int OGC_WKT_RECORD_ID = 2112;           // OGC Coordinate System WKT
     private static final String PROJECTION_USER_ID = "LASF_Projection";
-    // GeoKey ids holding an EPSG code directly (TIFFTagLocation == 0).
-    private static final int KEY_PROJECTED_CS = 3072;  // ProjectedCSTypeGeoKey
-    private static final int KEY_GEOGRAPHIC_CS = 2048;  // GeographicTypeGeoKey
-    private static final int KEY_PROJ_LINEAR_UNITS = 3076;  // ProjLinearUnitsGeoKey
-    private static final int KEY_VERTICAL_CS = 4096;        // VerticalCSTypeGeoKey
-    private static final int GEOKEY_UNDEFINED = 0;
-    private static final int GEOKEY_USER_DEFINED = 32767;
-    // EPSG unit-of-measure codes seen in ProjLinearUnitsGeoKey, in metres per unit.
-    private static final int UOM_METRE = 9001, UOM_FOOT = 9002, UOM_US_FOOT = 9003;
-    private static final double US_SURVEY_FOOT = 1200.0 / 3937.0;   // 0.3048006096...
-
-    // Linear-unit factor (metres per CRS unit) parsed from a WKT PROJCS UNIT element.
-    private static final Pattern WKT_PROJ_UNIT = Pattern.compile(
-            "(?i)UNIT\\s*\\[\\s*\"[^\"]*\"\\s*,\\s*([0-9.]+)");
-    // First quoted token in a WKT element, i.e. the CRS name.
-    private static final Pattern WKT_NAME = Pattern.compile("\"([^\"]*)\"");
-
-    private static final Pattern WKT_EPSG = Pattern.compile(
-            "(?i)(?:AUTHORITY|ID)\\s*\\[\\s*\"EPSG\"\\s*,\\s*\"?(\\d+)\"?\\s*\\]");
+    // GeoKey ids, EPSG unit codes, and the WKT/GeoKey parsing all live in GeoCrs.
 
     public final double minX, maxX, minY, maxY;
     /** EPSG code of the file's CRS, or {@code null} if none could be determined. */
@@ -231,16 +212,24 @@ public class LazBinaryReader {
             if (dataStart + recordLen > end) break;   // VLR data truncated in our buffer
 
             if (recordId == GEOKEY_DIRECTORY_RECORD_ID) {
-                int[] codes = geoKeyEpsgs(buf, dataStart, recordLen);
+                int[] codes = GeoCrs.geoKeyEpsgs(geoKeyShorts(buf, dataStart, recordLen));
                 if (codes[0] != 0) projected = codes[0];
                 if (codes[1] != 0) geographic = codes[1];
             } else if (recordId == OGC_WKT_RECORD_ID && PROJECTION_USER_ID.equals(userId)) {
-                fromWkt = wktEpsg(new String(buf, dataStart, recordLen, StandardCharsets.UTF_8));
+                fromWkt = GeoCrs.horizontalEpsg(new String(buf, dataStart, recordLen, StandardCharsets.UTF_8));
             }
             pos = dataStart + recordLen;
         }
         // Prefer a projected CRS; then an explicit WKT code; then a geographic CRS.
         return projected != null ? projected : (fromWkt != null ? fromWkt : geographic);
+    }
+
+    /** The GeoKeyDirectory VLR payload as its sequence of u16 shorts (for {@link GeoCrs}). */
+    private static int[] geoKeyShorts(byte[] buf, int dataStart, int recordLen) {
+        int n = recordLen / 2;
+        int[] gk = new int[n];
+        for (int i = 0; i < n; i++) gk[i] = u16(buf, dataStart + 2 * i);
+        return gk;
     }
 
     /**
@@ -259,16 +248,10 @@ public class LazBinaryReader {
             if (dataStart + recordLen > end) break;
 
             if (recordId == OGC_WKT_RECORD_ID && PROJECTION_USER_ID.equals(userId)) {
-                String wkt = new String(buf, dataStart, recordLen, StandardCharsets.UTF_8);
-                String projcs = firstBracketedSpan(wkt, "PROJCS", "PROJCRS");
-                if (projcs != null) {
-                    // The projected (linear) UNIT is the LAST one in the PROJCS; an earlier UNIT
-                    // belongs to the nested GEOGCS and is the angular degree (~0.0174533).
-                    Matcher m = WKT_PROJ_UNIT.matcher(projcs);
-                    while (m.find()) fromWkt = Double.parseDouble(m.group(1));
-                }
+                fromWkt = GeoCrs.projUnitMetres(new String(buf, dataStart, recordLen, StandardCharsets.UTF_8));
             } else if (recordId == GEOKEY_DIRECTORY_RECORD_ID) {
-                fromGeoKey = geoKeyUnitMetres(buf, dataStart, recordLen);
+                int uom = GeoCrs.geoKey(geoKeyShorts(buf, dataStart, recordLen), GeoCrs.KEY_PROJ_LINEAR_UNITS);
+                if (uom != 0) fromGeoKey = GeoCrs.metresPerUnit(uom);
             }
             pos = dataStart + recordLen;
         }
@@ -293,147 +276,21 @@ public class LazBinaryReader {
 
             if (recordId == OGC_WKT_RECORD_ID && PROJECTION_USER_ID.equals(userId)) {
                 String wkt = new String(buf, dataStart, recordLen, StandardCharsets.UTF_8);
-                String vert = firstBracketedSpan(wkt, "VERT_CS", "VERTCRS", "VERTICALCRS");
+                String vert = GeoCrs.firstBracketedSpan(wkt, "VERT_CS", "VERTCRS", "VERTICALCRS");
                 if (vert != null) {
-                    epsg = lastEpsg(vert);
-                    Matcher m = WKT_NAME.matcher(vert);
+                    epsg = GeoCrs.lastEpsg(vert);
+                    Matcher m = GeoCrs.NAME.matcher(vert);
                     if (m.find()) name = m.group(1);
                 }
             } else if (recordId == GEOKEY_DIRECTORY_RECORD_ID) {
-                geoKeyEpsg = geoKeyVerticalEpsg(buf, dataStart, recordLen);
+                int v = GeoCrs.geoKey(geoKeyShorts(buf, dataStart, recordLen), GeoCrs.KEY_VERTICAL_CS);
+                if (v != 0) geoKeyEpsg = v;
             }
             pos = dataStart + recordLen;
         }
         return new Vert(epsg != null ? epsg : geoKeyEpsg, name);
     }
 
-    /** VerticalCSTypeGeoKey -> EPSG code, or {@code null} if absent / user-defined. */
-    private static Integer geoKeyVerticalEpsg(byte[] buf, int start, int len) {
-        if (len < 8) return null;
-        int numKeys = u16(buf, start + 6);
-        for (int k = 0; k < numKeys; k++) {
-            int e = start + 8 + k * 8;
-            if (e + 8 > start + len) break;
-            if (u16(buf, e) != KEY_VERTICAL_CS || u16(buf, e + 2) != 0) continue;
-            int value = u16(buf, e + 6);
-            if (value == GEOKEY_UNDEFINED || value == GEOKEY_USER_DEFINED) return null;
-            return value;
-        }
-        return null;
-    }
-
-    /** ProjLinearUnitsGeoKey -> metres per unit, or {@code null} if absent / user-defined. */
-    private static Double geoKeyUnitMetres(byte[] buf, int start, int len) {
-        if (len < 8) return null;
-        int numKeys = u16(buf, start + 6);
-        for (int k = 0; k < numKeys; k++) {
-            int e = start + 8 + k * 8;
-            if (e + 8 > start + len) break;
-            if (u16(buf, e) != KEY_PROJ_LINEAR_UNITS || u16(buf, e + 2) != 0) continue;
-            return switch (u16(buf, e + 6)) {
-                case UOM_METRE -> 1.0;
-                case UOM_FOOT -> 0.3048;
-                case UOM_US_FOOT -> US_SURVEY_FOOT;
-                default -> null;
-            };
-        }
-        return null;
-    }
-
-    /**
-     * Parses a GeoTIFF GeoKeyDirectoryTag and returns {@code [projectedEpsg, geographicEpsg]}
-     * (0 where absent). Only directly-encoded codes (TIFFTagLocation == 0) are read.
-     */
-    private static int[] geoKeyEpsgs(byte[] buf, int start, int len) {
-        int projected = 0, geographic = 0;
-        if (len >= 8) {
-            int numKeys = u16(buf, start + 6);
-            for (int k = 0; k < numKeys; k++) {
-                int e = start + 8 + k * 8;
-                if (e + 8 > start + len) break;
-                int keyId = u16(buf, e);
-                int location = u16(buf, e + 2);
-                int value = u16(buf, e + 6);
-                if (location != 0 || value == GEOKEY_UNDEFINED || value == GEOKEY_USER_DEFINED) continue;
-                if (keyId == KEY_PROJECTED_CS) projected = value;
-                else if (keyId == KEY_GEOGRAPHIC_CS) geographic = value;
-            }
-        }
-        return new int[] { projected, geographic };
-    }
-
-    /**
-     * Extracts the EPSG code of the file's <em>horizontal</em> CRS from an OGC WKT
-     * string, or null.
-     * <p>
-     * A LAS/LAZ projection VLR often carries a compound CRS — e.g.
-     * {@code COMPD_CS["...", PROJCS[... AUTHORITY["EPSG","6441"]], VERT_CS[... AUTHORITY["EPSG","6360"]]]}
-     * — pairing a horizontal (projected/geographic) CRS with a vertical height CRS.
-     * Scanning the whole string for the last {@code AUTHORITY["EPSG",...]} would
-     * return the <em>vertical</em> code (e.g. 6360 = "NAVD88 height (ftUS)"), which is
-     * not a horizontal CRS and cannot georeference the bounding box. So we look inside
-     * the projected sub-CRS first, then the geographic one, and only fall back to a
-     * whole-string scan when neither is present.
-     */
-    private static Integer wktEpsg(String wkt) {
-        String horizontal = firstBracketedSpan(wkt, "PROJCS", "PROJCRS");
-        if (horizontal == null) {
-            horizontal = firstBracketedSpan(wkt, "GEOGCS", "GEOGCRS", "GEODCRS");
-        }
-        Integer epsg = horizontal != null ? lastEpsg(horizontal) : null;
-        return epsg != null ? epsg : lastEpsg(wkt);
-    }
-
-    /** The last EPSG authority code in a WKT fragment (the element's own code), or null. */
-    private static Integer lastEpsg(String wkt) {
-        Matcher m = WKT_EPSG.matcher(wkt);
-        Integer last = null;
-        while (m.find()) {
-            last = Integer.valueOf(m.group(1));   // an element's own authority is its last match
-        }
-        return last;
-    }
-
-    /**
-     * Returns the bracket-balanced substring of the first WKT element named by any of
-     * {@code keywords} (e.g. {@code PROJCS[...]}), or null if none appears. Quoted names
-     * are skipped so brackets inside them don't affect nesting; both {@code []} and
-     * {@code ()} delimiters are accepted.
-     */
-    private static String firstBracketedSpan(String wkt, String... keywords) {
-        String upper = wkt.toUpperCase(Locale.ROOT);
-        for (String kw : keywords) {
-            for (int idx = upper.indexOf(kw); idx >= 0; idx = upper.indexOf(kw, idx + 1)) {
-                boolean leftOk = idx == 0 || !Character.isLetterOrDigit(upper.charAt(idx - 1));
-                int open = idx + kw.length();
-                while (open < upper.length() && Character.isWhitespace(upper.charAt(open))) open++;
-                if (leftOk && open < upper.length()
-                        && (upper.charAt(open) == '[' || upper.charAt(open) == '(')) {
-                    return balancedSpan(wkt, open);
-                }
-            }
-        }
-        return null;
-    }
-
-    /** The substring from {@code open} (a '[' or '(') through its matching close bracket. */
-    private static String balancedSpan(String s, int open) {
-        int depth = 0;
-        boolean inString = false;
-        for (int i = open; i < s.length(); i++) {
-            char c = s.charAt(i);
-            if (c == '"') {
-                inString = !inString;
-            } else if (!inString) {
-                if (c == '[' || c == '(') {
-                    depth++;
-                } else if (c == ']' || c == ')') {
-                    if (--depth == 0) return s.substring(open, i + 1);
-                }
-            }
-        }
-        return s.substring(open);   // unbalanced; return the remainder
-    }
 
     /**
      * Returns the bounding box as a WKT polygon (closed ring), prefixed with

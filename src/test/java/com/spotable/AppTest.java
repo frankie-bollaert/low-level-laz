@@ -3,7 +3,6 @@ package com.spotable;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
-import java.lang.reflect.Method;
 
 import org.junit.Test;
 
@@ -21,10 +20,8 @@ public class AppTest
         assertTrue( true );
     }
 
-    private static Integer wktEpsg(String wkt) throws Exception {
-        Method m = LazBinaryReader.class.getDeclaredMethod("wktEpsg", String.class);
-        m.setAccessible(true);
-        return (Integer) m.invoke(null, wkt);
+    private static Integer wktEpsg(String wkt) {
+        return GeoCrs.horizontalEpsg(wkt);
     }
 
     /**
