@@ -12,12 +12,12 @@ import org.junit.Test;
 
 /**
  * Builds a minimal classic GeoTIFF in memory and drives it through the real
- * {@link DtmBounds} header parser (no I/O, no external fixtures).
+ * {@link TifBinaryReader} header parser (no I/O, no external fixtures).
  */
-public class DtmBoundsTest {
+public class TifBinaryReaderTest {
 
-    private static DtmBounds readBytes(byte[] file) throws Exception {
-        DtmBounds.Source src = new DtmBounds.Source() {
+    private static TifBinaryReader readBytes(byte[] file) throws Exception {
+        TifBinaryReader.Source src = new TifBinaryReader.Source() {
             public String label() { return "test.tif"; }
             public byte[] read(long offset, int len) {
                 if (offset >= file.length) return new byte[0];
@@ -26,9 +26,9 @@ public class DtmBoundsTest {
                 return Arrays.copyOfRange(file, from, to);
             }
         };
-        Method m = DtmBounds.class.getDeclaredMethod("read", DtmBounds.Source.class);
+        Method m = TifBinaryReader.class.getDeclaredMethod("read", TifBinaryReader.Source.class);
         m.setAccessible(true);
-        return (DtmBounds) m.invoke(null, src);
+        return (TifBinaryReader) m.invoke(null, src);
     }
 
     /**
@@ -103,7 +103,7 @@ public class DtmBoundsTest {
 
     @Test
     public void parsesBoundsAndCrs() throws Exception {
-        DtmBounds d = readBytes(sampleGeoTiff());
+        TifBinaryReader d = readBytes(sampleGeoTiff());
         assertEquals(2015000.0, d.minX, 1e-6);
         assertEquals(2015000.0 + 2000 * 2.5, d.maxX, 1e-6);
         assertEquals(358703.62, d.maxY, 1e-6);
@@ -114,7 +114,7 @@ public class DtmBoundsTest {
     /** Output mirrors LazBinaryReader: a bare bbox WKT carrying the SRID. */
     @Test
     public void emitsEwktGeometry() throws Exception {
-        DtmBounds d = readBytes(sampleGeoTiff());
+        TifBinaryReader d = readBytes(sampleGeoTiff());
         assertEquals(
             "SRID=6441;POLYGON ((2015000 354953.62, 2020000 354953.62, "
             + "2020000 358703.62, 2015000 358703.62, 2015000 354953.62))",

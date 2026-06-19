@@ -1,5 +1,5 @@
 // dtmbounds — read the georeferenced bounding box and CRS from a (Geo)TIFF DTM,
-// the raster counterpart to lazbounds. A Rust port of com.spotable.DtmBounds.
+// the raster counterpart to lazbounds. A Rust port of com.spotable.TifBinaryReader.
 //
 // Only the TIFF header, the first Image File Directory (IFD), and the handful of
 // georeferencing tags it points at are read — never the pixel data. A TIFF's IFD

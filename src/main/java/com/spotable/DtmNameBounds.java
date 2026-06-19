@@ -15,7 +15,7 @@ import java.util.regex.Pattern;
  * Derives each USGS 3DEP 1-meter DEM tile's WGS84 footprint <em>from its filename alone</em>
  * (no file I/O against the rasters), and writes a CSV of {@code filename,geometry}.
  * <p>
- * This is the filename-only counterpart to {@link DtmBounds}, which reads the real GeoTIFF
+ * This is the filename-only counterpart to {@link TifBinaryReader}, which reads the real GeoTIFF
  * headers. It exists because the USGS tile naming convention already encodes the footprint:
  * <pre>
  *   USGS_1M_&lt;zone&gt;_x&lt;XX&gt;y&lt;YYY&gt;_&lt;project&gt;.tif
@@ -35,7 +35,7 @@ import java.util.regex.Pattern;
  * CRS metadata (NAD83 / UTM zone 16N or 17N — Florida straddles the 84&deg;W boundary).
  * <p>
  * The four UTM corners are inverse-projected to geographic lon/lat with {@link Utm} (WGS84
- * ellipsoid) and emitted as EWKT {@code SRID=4326;POLYGON ((...))}, matching {@link DtmBounds}.
+ * ellipsoid) and emitted as EWKT {@code SRID=4326;POLYGON ((...))}, matching {@link TifBinaryReader}.
  */
 public final class DtmNameBounds {
 

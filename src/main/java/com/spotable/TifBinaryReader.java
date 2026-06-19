@@ -44,7 +44,7 @@ import software.amazon.awssdk.services.s3.model.S3Object;
  * file — the path and the box as georeferenced EWKT ({@code SRID=<epsg>;POLYGON(...)}).
  * BigTIFF (version 43) is supported alongside classic TIFF.
  */
-public class DtmBounds {
+public class TifBinaryReader {
 
     // ---- TIFF magic / structure ----
     private static final int TIFF_CLASSIC = 42;
@@ -76,7 +76,7 @@ public class DtmBounds {
     /** EPSG code of the horizontal CRS, or {@code null} if none could be determined. */
     public final Integer epsg;
 
-    private DtmBounds(double minX, double maxX, double minY, double maxY, Integer epsg) {
+    private TifBinaryReader(double minX, double maxX, double minY, double maxY, Integer epsg) {
         this.minX = minX;
         this.maxX = maxX;
         this.minY = minY;
@@ -121,11 +121,11 @@ public class DtmBounds {
     // ---- Reading ----
 
     /** Reads bounds and metadata from a local (Geo)TIFF file. */
-    public static DtmBounds read(Path file) throws IOException {
+    public static TifBinaryReader read(Path file) throws IOException {
         return read(new LocalSource(file));
     }
 
-    static DtmBounds read(Source source) throws IOException {
+    static TifBinaryReader read(Source source) throws IOException {
         byte[] head = source.read(0, 16);
         if (head.length < 8) {
             throw new IllegalArgumentException("Too short to be a TIFF: " + source.label());
@@ -168,7 +168,7 @@ public class DtmBounds {
             if (looksLikeWkt(citation)) epsg = wktEpsg(citation);
         }
 
-        return new DtmBounds(box[0], box[1], box[2], box[3], epsg);
+        return new TifBinaryReader(box[0], box[1], box[2], box[3], epsg);
     }
 
     private static ByteOrder byteOrder(byte[] head, String label) {
@@ -480,7 +480,7 @@ public class DtmBounds {
         }
 
         if (inputs.isEmpty()) {
-            System.err.println("Usage: java com.spotable.DtmBounds -i <file|dir|glob|s3-uri> [-i ...] [-o out.csv]");
+            System.err.println("Usage: java com.spotable.TifBinaryReader -i <file|dir|glob|s3-uri> [-i ...] [-o out.csv]");
             System.err.println("  -i/--input  (repeatable) source to read:");
             System.err.println("    Local: a .tif/.tiff file, a directory (recursive *.tif/*.tiff),");
             System.err.println("           or a glob such as 'dem/**/*.tif'.");
@@ -589,7 +589,7 @@ public class DtmBounds {
             PathMatcher matcher = FileSystems.getDefault().getPathMatcher("glob:" + key);
             listS3(s3, bucket, prefix, k -> matcher.matches(Path.of(k)), out);
         } else if (key.isEmpty() || key.endsWith("/")) {
-            listS3(s3, bucket, key, DtmBounds::isTiff, out);
+            listS3(s3, bucket, key, TifBinaryReader::isTiff, out);
         } else {
             out.put("s3://" + bucket + "/" + key, new S3Source(s3, bucket, key));
         }
