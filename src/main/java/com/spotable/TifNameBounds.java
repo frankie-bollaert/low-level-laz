@@ -147,29 +147,41 @@ public final class TifNameBounds {
     }
 
     public static void main(String[] args) throws IOException {
-        Path input = null;
-        Path output = null;
-        for (String a : args) {
-            if (input == null) input = Path.of(a);
-            else if (output == null) output = Path.of(a);
-            else {
-                System.err.println("Unexpected extra argument: " + a);
-                System.exit(2);
+        Path input = null, output = null, mergedOut = null;
+        String prefix = null;
+        for (int i = 0; i < args.length; i++) {
+            String a = args[i];
+            switch (a) {
+                case "--input", "-i" -> input = Path.of(requireArg(args, ++i, a));
+                case "--output", "-o" -> output = Path.of(requireArg(args, ++i, a));
+                case "--merged" -> mergedOut = Path.of(requireArg(args, ++i, a));
+                case "--prefix" -> prefix = requireArg(args, ++i, a).replaceAll("/+$", "");
+                default -> { System.err.println("Unknown argument: " + a); System.exit(2); }
             }
         }
         if (input == null) {
-            System.err.println("Usage: java com.spotable.TifNameBounds <dtm.txt> [out.csv]");
-            System.err.println("  Reads one USGS DEM path per line and writes CSV rows:");
-            System.err.println("    \"<filename>\",\"SRID=4326;POLYGON ((...))\"");
-            System.err.println("  Writes to <out.csv> if given, otherwise to stdout.");
+            System.err.println("Usage: java com.spotable.TifNameBounds --input <dtm.txt> [--output <bounds.csv>]");
+            System.err.println("                                       [--merged <file>] [--prefix <base>]");
+            System.err.println("  --input   (-i) list of USGS DEM paths, one per line (required).");
+            System.err.println("  --output  (-o) per-tile CSV \"<project>\",\"<filename>\",\"SRID=4326;POLYGON ((...))\"");
+            System.err.println("                 (default: stdout). Other naming forms are skipped (logged to stderr).");
+            System.err.println("  --merged  also write one row per sub-project:");
+            System.err.println("            \"<project>\",\"<directory>\",\"<files>\",\"<year>\",\"<EPSG>\",\"<horizontal CRS>\",\"SRID=4326;MULTIPOLYGON(...)\"");
+            System.err.println("            (the union of that project's 10 km tiles, gaps preserved).");
+            System.err.println("  --prefix  base path (e.g. s3://bucket/dtm/us) prepended to the directory column.");
             System.exit(2);
             return;
         }
 
-        int parsed = 0, skipped = 0;
+        // Pass 1: collect the recognised tiles, as LazNameBounds.Matched so the merge can be reused.
+        java.util.List<LazNameBounds.Matched> matched = new java.util.ArrayList<>();
+        int skipped = 0;
         try (BufferedReader in = Files.newBufferedReader(input, StandardCharsets.UTF_8);
              Writer out = output != null
                      ? Files.newBufferedWriter(output, StandardCharsets.UTF_8) : null) {
+            String header = csvRow("project", "filename", "geometry");
+            if (out != null) { out.write(header); out.write('\n'); }
+            else if (mergedOut == null) System.out.println(header);
             String line;
             while ((line = in.readLine()) != null) {
                 line = line.strip();
@@ -180,18 +192,48 @@ public final class TifNameBounds {
                     skipped++;
                     continue;
                 }
-                String row = csvRow(line, toWgs84Wkt(t));
-                if (out != null) {
-                    out.write(row);
-                    out.write('\n');
-                } else {
-                    System.out.println(row);
-                }
-                parsed++;
+                String project = LazNameBounds.groupKey(line);
+                matched.add(new LazNameBounds.Matched(line, project, LazNameBounds.Proj.utm(t.zone()),
+                        t.xi() * TILE, t.yi() * TILE - TILE, TILE));   // SW corner; tile = 10 km
+                String row = csvRow(project, line, toWgs84Wkt(t));
+                if (out != null) { out.write(row); out.write('\n'); }
+                else if (mergedOut == null) System.out.println(row);
             }
         }
-        System.err.println("Wrote " + parsed + " rows" + (skipped > 0 ? ", skipped " + skipped : ""));
+        System.err.println("Wrote " + matched.size() + " rows" + (skipped > 0 ? ", skipped " + skipped : ""));
+
+        if (mergedOut != null) {
+            java.util.Map<String, java.util.List<LazNameBounds.Matched>> byProject = new java.util.TreeMap<>();
+            for (LazNameBounds.Matched m : matched) {
+                byProject.computeIfAbsent(m.project(), k -> new java.util.ArrayList<>()).add(m);
+            }
+            try (Writer out = Files.newBufferedWriter(mergedOut, StandardCharsets.UTF_8)) {
+                out.write(csvRow("project", "directory", "files", "year",
+                        "horizontal_epsg", "horizontal_projection", "geometry"));
+                out.write('\n');
+                for (var e : byProject.entrySet()) {
+                    java.util.List<LazNameBounds.Matched> g = e.getValue();
+                    String directory = LazNameBounds.groupDir(g.get(0).line());
+                    if (prefix != null) directory = prefix + "/" + directory.replaceAll("^/+", "");
+                    java.util.TreeSet<String> epsg = new java.util.TreeSet<>();
+                    java.util.TreeSet<String> crs = new java.util.TreeSet<>();
+                    for (LazNameBounds.Matched m : g) { epsg.add(m.proj().epsg()); crs.add(m.proj().crs()); }
+                    out.write(csvRow(e.getKey(), directory, Integer.toString(g.size()),
+                            LazNameBounds.year(e.getKey(), g.get(0).line()),
+                            String.join("; ", epsg), String.join("; ", crs),
+                            LazNameBounds.mergedWkt(g, TILE)));
+                    out.write('\n');
+                }
+            }
+            System.err.println("Wrote " + byProject.size() + " merged project rows to " + mergedOut);
+        }
         if (skipped > 0) System.exit(1);
+    }
+
+    /** Returns {@code args[i]} or exits with an error if the flag {@code flag} has no value. */
+    private static String requireArg(String[] args, int i, String flag) {
+        if (i >= args.length) { System.err.println(flag + " needs a value"); System.exit(2); }
+        return args[i];
     }
 
     /**

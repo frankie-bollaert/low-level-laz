@@ -7,9 +7,9 @@ file headers from S3 to attach measured point density and the vertical CRS.
 The pipeline turns a flat list of object paths into three CSVs (step 1 can also split the
 per-tile rows into one CSV per project — see `--partitioned`):
 
-- `laz_bounds.csv` — one WGS84 footprint per tile (name-derived, no network).
-- `laz_merged.csv` — one row per sub-project: merged footprint + horizontal CRS (name-derived).
-- `laz_merged_meta.csv` — `laz_merged.csv` enriched with the **vertical CRS** and measured
+- `meta/laz-bounds.csv` — one WGS84 footprint per tile (name-derived, no network).
+- `meta/laz-merged.csv` — one row per sub-project: merged footprint + horizontal CRS (name-derived).
+- `meta/laz-by-project.csv` — `meta/laz-merged.csv` enriched with the **vertical CRS** and measured
   **point density**, read from a sample of actual headers on S3.
 
 ## Prerequisites
@@ -60,8 +60,8 @@ Paths are relative to a base prefix that is supplied separately with `--prefix`.
 ```sh
 java -cp "$JAR" com.spotable.LazNameBounds \
     --input point-cloud.csv \
-    --output laz_bounds.csv \
-    --merged laz_merged.csv \
+    --output meta/laz-bounds.csv \
+    --merged meta/laz-merged.csv \
     --prefix s3://spotable-geo-us-west-2/point-cloud/us
 ```
 
@@ -74,8 +74,8 @@ java -cp "$JAR" com.spotable.LazNameBounds \
 | `--tile` | no | force a fixed tile size in metres (default: inferred per project from the grid step) |
 | `--prefix` | no | base path prepended to the `directory` column |
 
-- `laz_bounds.csv` columns: `project, filename, geometry`
-- `laz_merged.csv` columns: `project, directory, files, year, horizontal_epsg,
+- `meta/laz-bounds.csv` columns: `project, filename, geometry`
+- `meta/laz-merged.csv` columns: `project, directory, files, year, horizontal_epsg,
   horizontal_projection, geometry`
 - `--prefix` is prepended to the `directory` column only (the footprints are computed from
   the names, so this step makes no network calls).
@@ -87,9 +87,9 @@ Names that can't be decoded to a footprint are skipped and counted on stderr (se
 
 ```sh
 AWS_PROFILE=west java -cp "$JAR" com.spotable.LazByProject \
-    --merged laz_merged.csv \
-    --bounds laz_bounds.csv \
-    --output laz_merged_meta.csv \
+    --merged meta/laz-merged.csv \
+    --bounds meta/laz-bounds.csv \
+    --output meta/laz-by-project.csv \
     --prefix s3://spotable-geo-us-west-2/point-cloud/us \
     --sample 5
 ```
@@ -111,7 +111,7 @@ file's header** (a single ranged GET — no point decompression), and records:
   linear unit is honoured, so the area is always in m² (US-foot CRSs are converted).
 - `avg_point_spacing_m` — nominal ground sample distance, `1 / sqrt(density)`.
 
-`laz_merged_meta.csv` columns: `project, directory, files, year, horizontal_epsg,
+`meta/laz-by-project.csv` columns: `project, directory, files, year, horizontal_epsg,
 horizontal_projection, vertical_epsg, vertical_projection, point_density_per_m2,
 avg_point_spacing_m, geometry` (geometry kept last).
 
@@ -124,14 +124,15 @@ same base used in step 1.
 mvn -q package -DskipTests
 JAR=target/low-level-laz-1.0-SNAPSHOT.jar
 PREFIX=s3://spotable-geo-us-west-2/point-cloud/us
+mkdir -p meta
 
 # 1. footprints (offline)
-java -cp "$JAR" com.spotable.LazNameBounds --input point-cloud.csv --output laz_bounds.csv \
-    --merged laz_merged.csv --prefix "$PREFIX"
+java -cp "$JAR" com.spotable.LazNameBounds --input point-cloud.csv --output meta/laz-bounds.csv \
+    --merged meta/laz-merged.csv --prefix "$PREFIX"
 
 # 2. + vertical CRS & density (reads headers from S3)
 AWS_PROFILE=west java -cp "$JAR" com.spotable.LazByProject \
-    --merged laz_merged.csv --bounds laz_bounds.csv --output laz_merged_meta.csv \
+    --merged meta/laz-merged.csv --bounds meta/laz-bounds.csv --output meta/laz-by-project.csv \
     --prefix "$PREFIX" --sample 5
 ```
 
@@ -153,8 +154,29 @@ GAW/GAE field's scale differs between delivery blocks) and `FL_Suwannee_River_Li
 (no single origin fits its index). EPT octree keys and other unconfirmed per-project schemes
 are also skipped. The run prints the converted/skipped counts to stderr.
 
+## Raster (DTM) pipeline
+
+The same two-step shape exists for the 1&nbsp;m DEM rasters, over a `dtm.txt` list of GeoTIFF paths:
+
+```sh
+# 1. footprints + per-project merge (offline; names encode the UTM tile)
+java -cp "$JAR" com.spotable.TifNameBounds --input dtm.txt --output meta/tif-bounds.csv \
+    --merged meta/tif-merged.csv --prefix s3://spotable-geo-us-west-2/dtm/us
+
+# 2. enrich each project with vertical CRS + raster resolution (reads GeoTIFF headers from S3)
+AWS_PROFILE=west java -cp "$JAR" com.spotable.TifByProject \
+    --merged meta/tif-merged.csv --bounds meta/tif-bounds.csv --output meta/tif-by-project.csv \
+    --prefix s3://spotable-geo-us-west-2/dtm/us --sample 5
+```
+
+`TifByProject` mirrors `LazByProject` but appends `vertical_epsg`, `vertical_projection`, and
+`resolution_m` (median pixel size in metres) instead of the point-density columns — rasters have a
+resolution, not a point count. (1&nbsp;m DEMs rarely declare a vertical CRS, so that column is
+usually blank.) Flags match `LazByProject`: `--merged`, `--bounds`, `--output`/`-o`, `--prefix`,
+`--sample`.
+
 ## Related tools (in the same jar)
 
-- `com.spotable.LazBinaryReader` — read the true bounding box / CRS / point count from one or more
-  LAS/LAZ files (local, directory, glob, or `s3://`), via ranged GETs. Used by step 2.
-- `com.spotable.TifNameBounds` / `com.spotable.TifBinaryReader` — the DTM (raster) counterparts.
+- `com.spotable.LazBinaryReader` / `com.spotable.TifBinaryReader` — read the true bounding box, CRS,
+  and (LAS/LAZ) point count or (GeoTIFF) pixel size / vertical CRS from one or more files (local,
+  directory, glob, or `s3://`), via ranged GETs. Used by the step-2 tools.

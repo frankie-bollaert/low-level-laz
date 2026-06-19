@@ -62,8 +62,16 @@ public class TifBinaryReader {
     // GeoKey ids holding an EPSG code directly (TIFFTagLocation == 0).
     private static final int KEY_PROJECTED_CS = 3072;   // ProjectedCSTypeGeoKey
     private static final int KEY_GEOGRAPHIC_CS = 2048;  // GeographicTypeGeoKey
+    private static final int KEY_PROJ_LINEAR_UNITS = 3076;  // ProjLinearUnitsGeoKey (EPSG UoM code)
+    private static final int KEY_VERTICAL_CS = 4096;    // VerticalCSTypeGeoKey
     private static final int GEOKEY_UNDEFINED = 0;
     private static final int GEOKEY_USER_DEFINED = 32767;
+    // EPSG unit-of-measure codes, in metres per unit.
+    private static final int UOM_METRE = 9001, UOM_FOOT = 9002, UOM_US_FOOT = 9003;
+    private static final double US_SURVEY_FOOT = 1200.0 / 3937.0;
+    // Names for the vertical CRS codes seen in these DEMs (GeoTIFF rarely carries a vertical name).
+    private static final java.util.Map<Integer, String> VERTICAL_NAMES = java.util.Map.of(
+            5703, "NAVD88 height (m)", 6360, "NAVD88 height (ftUS)", 5714, "MSL height (m)");
 
     // How far we'll read at a single offset (IFD window, and any tag payload).
     private static final int READ_WINDOW = 64 * 1024;
@@ -75,13 +83,23 @@ public class TifBinaryReader {
     public final double minX, maxX, minY, maxY;
     /** EPSG code of the horizontal CRS, or {@code null} if none could be determined. */
     public final Integer epsg;
+    /** Ground sample distance (pixel size) in metres, or {@code NaN} if unknown. */
+    public final double resolutionMetres;
+    /** EPSG code of the vertical CRS, or {@code null} (most DEMs declare none). */
+    public final Integer verticalEpsg;
+    /** Human-readable vertical CRS name, or {@code null}. */
+    public final String verticalCrs;
 
-    private TifBinaryReader(double minX, double maxX, double minY, double maxY, Integer epsg) {
+    private TifBinaryReader(double minX, double maxX, double minY, double maxY, Integer epsg,
+                           double resolutionMetres, Integer verticalEpsg, String verticalCrs) {
         this.minX = minX;
         this.maxX = maxX;
         this.minY = minY;
         this.maxY = maxY;
         this.epsg = epsg;
+        this.resolutionMetres = resolutionMetres;
+        this.verticalEpsg = verticalEpsg;
+        this.verticalCrs = verticalCrs;
     }
 
     // ---- Sources: anything that can yield an arbitrary byte range of a TIFF ----
@@ -125,6 +143,11 @@ public class TifBinaryReader {
         return read(new LocalSource(file));
     }
 
+    /** Reads georeferencing/metadata from an S3 object via ranged GETs. */
+    public static TifBinaryReader readS3(S3Client s3, String bucket, String key) throws IOException {
+        return read(new S3Source(s3, bucket, key));
+    }
+
     static TifBinaryReader read(Source source) throws IOException {
         byte[] head = source.read(0, 16);
         if (head.length < 8) {
@@ -161,14 +184,60 @@ public class TifBinaryReader {
 
         // CRS from the GeoKey directory; fall back to an EPSG embedded in a WKT citation
         // (used by GeoTIFFs with a user-defined CRS).
-        int[] codes = geoKeyEpsgs(tiff.shorts(TAG_GEO_KEY_DIRECTORY));
+        int[] gk = tiff.shorts(TAG_GEO_KEY_DIRECTORY);
+        int[] codes = geoKeyEpsgs(gk);
         Integer epsg = codes[0] != 0 ? codes[0] : (codes[1] != 0 ? codes[1] : null);
         if (epsg == null) {
             String citation = tiff.ascii(TAG_GEO_ASCII_PARAMS);
             if (looksLikeWkt(citation)) epsg = wktEpsg(citation);
         }
 
-        return new TifBinaryReader(box[0], box[1], box[2], box[3], epsg);
+        // Ground sample distance (pixel size) in metres, honouring the projected linear unit.
+        double pixel = pixelSize(tiff);
+        double unit = unitMetres(geoKeyValue(gk, KEY_PROJ_LINEAR_UNITS));
+        double resolution = Double.isNaN(pixel) ? Double.NaN : pixel * unit;
+
+        // Vertical CRS, when the DEM declares one (most do not).
+        int vCode = geoKeyValue(gk, KEY_VERTICAL_CS);
+        Integer verticalEpsg = vCode > 0 ? vCode : null;
+        String verticalCrs = verticalEpsg == null ? null
+                : VERTICAL_NAMES.getOrDefault(verticalEpsg, "EPSG:" + verticalEpsg);
+
+        return new TifBinaryReader(box[0], box[1], box[2], box[3], epsg,
+                resolution, verticalEpsg, verticalCrs);
+    }
+
+    /** Pixel size in CRS units from the transform or pixel-scale tags, or {@code NaN}. */
+    private static double pixelSize(Tiff tiff) {
+        double[] t = tiff.doubles(TAG_MODEL_TRANSFORMATION);
+        if (t != null && t.length >= 16) return Math.hypot(t[0], t[4]);   // |first column|
+        double[] scale = tiff.doubles(TAG_MODEL_PIXEL_SCALE);
+        if (scale != null && scale.length >= 1) return scale[0];
+        return Double.NaN;
+    }
+
+    /** Metres per CRS unit from a ProjLinearUnitsGeoKey EPSG UoM code (defaults to metre). */
+    private static double unitMetres(int uom) {
+        return switch (uom) {
+            case UOM_FOOT -> 0.3048;
+            case UOM_US_FOOT -> US_SURVEY_FOOT;
+            default -> 1.0;   // UOM_METRE, undefined, or absent
+        };
+    }
+
+    /** First directly-encoded value for {@code keyId} in the GeoKey directory, or 0 if absent. */
+    private static int geoKeyValue(int[] gk, int keyId) {
+        if (gk == null || gk.length < 4) return 0;
+        int numKeys = gk[3];
+        for (int k = 0; k < numKeys; k++) {
+            int base = 4 + k * 4;
+            if (base + 4 > gk.length) break;
+            if (gk[base] == keyId && gk[base + 1] == 0) {
+                int value = gk[base + 3];
+                return value == GEOKEY_UNDEFINED || value == GEOKEY_USER_DEFINED ? 0 : value;
+            }
+        }
+        return 0;
     }
 
     private static ByteOrder byteOrder(byte[] head, String label) {
