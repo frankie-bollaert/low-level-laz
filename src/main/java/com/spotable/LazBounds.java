@@ -50,10 +50,13 @@ public class LazBounds {
     private static final int OFF_HEADER_SIZE = 94;        // u16
     private static final int OFF_OFFSET_TO_POINT_DATA = 96; // u32
     private static final int OFF_NUMBER_OF_VLRS = 100;   // u32
+    private static final int OFF_VERSION_MINOR = 25;     // u8
+    private static final int OFF_LEGACY_POINT_COUNT = 107; // u32 (LAS 1.0-1.3, legacy in 1.4)
     private static final int OFF_MAX_X = 179;            // doubles from here on
     private static final int OFF_MIN_X = 187;
     private static final int OFF_MAX_Y = 195;
     private static final int OFF_MIN_Y = 203;
+    private static final int OFF_EXTENDED_POINT_COUNT = 247; // u64 (LAS 1.4 header)
 
     // Smallest possible header (LAS 1.0–1.2). Below this the file is not a valid LAS.
     private static final int MIN_HEADER_SIZE = OFF_MIN_Y + 8 + 16; // through Min/Max Z = 227
@@ -74,8 +77,19 @@ public class LazBounds {
     // GeoKey ids holding an EPSG code directly (TIFFTagLocation == 0).
     private static final int KEY_PROJECTED_CS = 3072;  // ProjectedCSTypeGeoKey
     private static final int KEY_GEOGRAPHIC_CS = 2048;  // GeographicTypeGeoKey
+    private static final int KEY_PROJ_LINEAR_UNITS = 3076;  // ProjLinearUnitsGeoKey
+    private static final int KEY_VERTICAL_CS = 4096;        // VerticalCSTypeGeoKey
     private static final int GEOKEY_UNDEFINED = 0;
     private static final int GEOKEY_USER_DEFINED = 32767;
+    // EPSG unit-of-measure codes seen in ProjLinearUnitsGeoKey, in metres per unit.
+    private static final int UOM_METRE = 9001, UOM_FOOT = 9002, UOM_US_FOOT = 9003;
+    private static final double US_SURVEY_FOOT = 1200.0 / 3937.0;   // 0.3048006096...
+
+    // Linear-unit factor (metres per CRS unit) parsed from a WKT PROJCS UNIT element.
+    private static final Pattern WKT_PROJ_UNIT = Pattern.compile(
+            "(?i)UNIT\\s*\\[\\s*\"[^\"]*\"\\s*,\\s*([0-9.]+)");
+    // First quoted token in a WKT element, i.e. the CRS name.
+    private static final Pattern WKT_NAME = Pattern.compile("\"([^\"]*)\"");
 
     private static final Pattern WKT_EPSG = Pattern.compile(
             "(?i)(?:AUTHORITY|ID)\\s*\\[\\s*\"EPSG\"\\s*,\\s*\"?(\\d+)\"?\\s*\\]");
@@ -83,13 +97,31 @@ public class LazBounds {
     public final double minX, maxX, minY, maxY;
     /** EPSG code of the file's CRS, or {@code null} if none could be determined. */
     public final Integer epsg;
+    /** Number of point records declared in the header. */
+    public final long pointCount;
+    /** Metres per horizontal CRS unit (1.0 for metre CRSs, ~0.3048 for US-foot CRSs). */
+    public final double unitMetres;
+    /** EPSG code of the file's vertical CRS (e.g. 5703 = NAVD88 height), or {@code null}. */
+    public final Integer verticalEpsg;
+    /** Human-readable vertical CRS name (e.g. {@code NAVD88 height (m)}), or {@code null}. */
+    public final String verticalCrs;
 
-    private LazBounds(double minX, double maxX, double minY, double maxY, Integer epsg) {
+    private LazBounds(double minX, double maxX, double minY, double maxY, Integer epsg,
+                      long pointCount, double unitMetres, Integer verticalEpsg, String verticalCrs) {
         this.minX = minX;
         this.maxX = maxX;
         this.minY = minY;
         this.maxY = maxY;
         this.epsg = epsg;
+        this.pointCount = pointCount;
+        this.unitMetres = unitMetres;
+        this.verticalEpsg = verticalEpsg;
+        this.verticalCrs = verticalCrs;
+    }
+
+    /** Ground area of the bounding box in square metres (uses {@link #unitMetres}). */
+    public double areaSqMetres() {
+        return (maxX - minX) * (maxY - minY) * unitMetres * unitMetres;
     }
 
     // ---- Sources: anything that can yield the first bytes of a LAS/LAZ file ----
@@ -125,6 +157,11 @@ public class LazBounds {
         return read(new LocalSource(file));
     }
 
+    /** Reads header bounds/CRS/point-count from an S3 object via a single ranged GET. */
+    public static LazBounds readS3(S3Client s3, String bucket, String key) throws IOException {
+        return read(new S3Source(s3, bucket, key));
+    }
+
     static LazBounds read(Source source) throws IOException {
         byte[] buf = readPrefix(source, INITIAL_READ);
         if (buf.length < MIN_HEADER_SIZE) {
@@ -142,7 +179,18 @@ public class LazBounds {
         long offsetToPointData = u32(buf, OFF_OFFSET_TO_POINT_DATA);
         long numVlrs = u32(buf, OFF_NUMBER_OF_VLRS);
 
+        // Point count: LAS 1.4 keeps a u64 in the larger header; older versions a u32. The legacy
+        // field is 0 in some 1.4 files, so prefer the extended field when the header reaches it.
+        int versionMinor = buf[OFF_VERSION_MINOR] & 0xFF;
+        long pointCount = u32(buf, OFF_LEGACY_POINT_COUNT);
+        if (versionMinor >= 4 && headerSize >= OFF_EXTENDED_POINT_COUNT + 8) {
+            long extended = u64(buf, OFF_EXTENDED_POINT_COUNT);
+            if (extended > 0) pointCount = extended;
+        }
+
         Integer epsg = null;
+        double unitMetres = 1.0;
+        Vert vert = new Vert(null, null);
         if (numVlrs > 0 && headerSize >= MIN_HEADER_SIZE && offsetToPointData > headerSize) {
             // The VLR block is [headerSize, offsetToPointData). Make sure we've read it.
             if (offsetToPointData > buf.length && offsetToPointData <= VLR_READ_CAP) {
@@ -150,10 +198,16 @@ public class LazBounds {
             }
             int vlrEnd = (int) Math.min(offsetToPointData, buf.length);
             epsg = findEpsg(buf, headerSize, vlrEnd, numVlrs);
+            unitMetres = findUnitMetres(buf, headerSize, vlrEnd, numVlrs);
+            vert = findVertical(buf, headerSize, vlrEnd, numVlrs);
         }
 
-        return new LazBounds(minX, maxX, minY, maxY, epsg);
+        return new LazBounds(minX, maxX, minY, maxY, epsg, pointCount, unitMetres,
+                vert.epsg(), vert.name());
     }
+
+    /** A file's vertical CRS: EPSG code and/or human-readable name (either may be null). */
+    private record Vert(Integer epsg, String name) {}
 
     /** Reads up to {@code len} leading bytes from the source (may return fewer at EOF). */
     private static byte[] readPrefix(Source source, int len) throws IOException {
@@ -186,6 +240,103 @@ public class LazBounds {
         }
         // Prefer a projected CRS; then an explicit WKT code; then a geographic CRS.
         return projected != null ? projected : (fromWkt != null ? fromWkt : geographic);
+    }
+
+    /**
+     * Scans the VLR block for the horizontal CRS's linear unit and returns metres-per-unit.
+     * Reads the WKT {@code PROJCS} {@code UNIT} factor when present, else the GeoTIFF
+     * {@code ProjLinearUnitsGeoKey}; defaults to 1.0 (metre) when neither is found.
+     */
+    private static double findUnitMetres(byte[] buf, int start, int end, long numVlrs) {
+        Double fromWkt = null, fromGeoKey = null;
+        int pos = start;
+        for (long i = 0; i < numVlrs && pos + VLR_HEADER_LEN <= end; i++) {
+            String userId = cstr(buf, pos + 2, 16);
+            int recordId = u16(buf, pos + 18);
+            int recordLen = u16(buf, pos + 20);
+            int dataStart = pos + VLR_HEADER_LEN;
+            if (dataStart + recordLen > end) break;
+
+            if (recordId == OGC_WKT_RECORD_ID && PROJECTION_USER_ID.equals(userId)) {
+                String wkt = new String(buf, dataStart, recordLen, StandardCharsets.UTF_8);
+                String projcs = firstBracketedSpan(wkt, "PROJCS", "PROJCRS");
+                if (projcs != null) {
+                    // The projected (linear) UNIT is the LAST one in the PROJCS; an earlier UNIT
+                    // belongs to the nested GEOGCS and is the angular degree (~0.0174533).
+                    Matcher m = WKT_PROJ_UNIT.matcher(projcs);
+                    while (m.find()) fromWkt = Double.parseDouble(m.group(1));
+                }
+            } else if (recordId == GEOKEY_DIRECTORY_RECORD_ID) {
+                fromGeoKey = geoKeyUnitMetres(buf, dataStart, recordLen);
+            }
+            pos = dataStart + recordLen;
+        }
+        if (fromWkt != null) return fromWkt;
+        return fromGeoKey != null ? fromGeoKey : 1.0;
+    }
+
+    /**
+     * Scans the VLR block for the file's vertical CRS. Reads the WKT {@code VERT_CS} name and its
+     * EPSG when present, else the GeoTIFF {@code VerticalCSTypeGeoKey} code; null fields when absent.
+     */
+    private static Vert findVertical(byte[] buf, int start, int end, long numVlrs) {
+        Integer epsg = null, geoKeyEpsg = null;
+        String name = null;
+        int pos = start;
+        for (long i = 0; i < numVlrs && pos + VLR_HEADER_LEN <= end; i++) {
+            String userId = cstr(buf, pos + 2, 16);
+            int recordId = u16(buf, pos + 18);
+            int recordLen = u16(buf, pos + 20);
+            int dataStart = pos + VLR_HEADER_LEN;
+            if (dataStart + recordLen > end) break;
+
+            if (recordId == OGC_WKT_RECORD_ID && PROJECTION_USER_ID.equals(userId)) {
+                String wkt = new String(buf, dataStart, recordLen, StandardCharsets.UTF_8);
+                String vert = firstBracketedSpan(wkt, "VERT_CS", "VERTCRS", "VERTICALCRS");
+                if (vert != null) {
+                    epsg = lastEpsg(vert);
+                    Matcher m = WKT_NAME.matcher(vert);
+                    if (m.find()) name = m.group(1);
+                }
+            } else if (recordId == GEOKEY_DIRECTORY_RECORD_ID) {
+                geoKeyEpsg = geoKeyVerticalEpsg(buf, dataStart, recordLen);
+            }
+            pos = dataStart + recordLen;
+        }
+        return new Vert(epsg != null ? epsg : geoKeyEpsg, name);
+    }
+
+    /** VerticalCSTypeGeoKey -> EPSG code, or {@code null} if absent / user-defined. */
+    private static Integer geoKeyVerticalEpsg(byte[] buf, int start, int len) {
+        if (len < 8) return null;
+        int numKeys = u16(buf, start + 6);
+        for (int k = 0; k < numKeys; k++) {
+            int e = start + 8 + k * 8;
+            if (e + 8 > start + len) break;
+            if (u16(buf, e) != KEY_VERTICAL_CS || u16(buf, e + 2) != 0) continue;
+            int value = u16(buf, e + 6);
+            if (value == GEOKEY_UNDEFINED || value == GEOKEY_USER_DEFINED) return null;
+            return value;
+        }
+        return null;
+    }
+
+    /** ProjLinearUnitsGeoKey -> metres per unit, or {@code null} if absent / user-defined. */
+    private static Double geoKeyUnitMetres(byte[] buf, int start, int len) {
+        if (len < 8) return null;
+        int numKeys = u16(buf, start + 6);
+        for (int k = 0; k < numKeys; k++) {
+            int e = start + 8 + k * 8;
+            if (e + 8 > start + len) break;
+            if (u16(buf, e) != KEY_PROJ_LINEAR_UNITS || u16(buf, e + 2) != 0) continue;
+            return switch (u16(buf, e + 6)) {
+                case UOM_METRE -> 1.0;
+                case UOM_FOOT -> 0.3048;
+                case UOM_US_FOOT -> US_SURVEY_FOOT;
+                default -> null;
+            };
+        }
+        return null;
     }
 
     /**
@@ -315,6 +466,11 @@ public class LazBounds {
     private static long u32(byte[] b, int o) {
         return (b[o] & 0xFFL) | ((b[o + 1] & 0xFFL) << 8)
                 | ((b[o + 2] & 0xFFL) << 16) | ((b[o + 3] & 0xFFL) << 24);
+    }
+
+    private static long u64(byte[] b, int o) {
+        long lo = u32(b, o), hi = u32(b, o + 4);
+        return lo | (hi << 32);
     }
 
     // Reads a fixed-width, null-padded ASCII field and trims it.

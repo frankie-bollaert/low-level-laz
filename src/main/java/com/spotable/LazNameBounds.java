@@ -27,10 +27,19 @@ import java.util.regex.Pattern;
  * SW corner plus a square {@link #tileMetres} tile is reprojected to lon/lat with
  * {@link DtmNameBounds.Utm}, and emitted as EWKT {@code SRID=4326;POLYGON ((...))}.
  * <p>
+ * It also decodes two grid-indexed families whose corner is encoded in the project's own CRS,
+ * each gated to projects verified against the actual LAZ header bounds + CRS VLR:
+ * <ul>
+ *   <li>Florida State Plane LID grids ({@code ..._LID2019_447196_W.laz}); see {@link #parseLid}.</li>
+ *   <li>USGS {@code eNNNNnNNNN}/{@code wNNNNnNNNN} grids ({@code ..._e0853n0913.laz} in CONUS
+ *       Albers, {@code ..._w314000n3291500.laz} in UTM); see {@link #parseEastNorth}.</li>
+ *   <li>Florida State Plane names without the {@code LID} token: a packed column/row index
+ *       ({@code ..._038576_N.laz}, {@code ..._471241.laz}) or an absolute-feet corner
+ *       ({@code ..._692500_725000.laz}); see {@link #parseStatePlane}.</li>
+ * </ul>
  * Other LPC naming families in the wild are out of scope here and are skipped (logged to
  * stderr): EPT octree-node keys ({@code ept-data/12-339-2750-2044.laz}, geometry not in the
- * name), and per-project schemes such as {@code LID2019_651011_N}, {@code e0853n0913},
- * {@code 692500_725000}, {@code GAW_20100945}.
+ * name), and unverified per-project schemes such as {@code 692500_725000}, {@code GAW_20100945}.
  * <p>
  * The tile size is a project property the single name can't carry, so it is derived per
  * project from the minimum grid step among that project's tiles in the input list (e.g.
@@ -43,7 +52,8 @@ public final class LazNameBounds {
 
     /** MGRS tile id at the end of the name: zone, band, col, row, then 3+3 digits, then .laz. */
     private static final Pattern MGRS_TILE = Pattern.compile(
-            "_(\\d{2})([C-HJ-NP-X])([A-HJ-NP-Z])([A-HJ-NP-V])(\\d{3})(\\d{3})\\.laz$");
+            "_(\\d{2})([C-HJ-NP-X])([A-HJ-NP-Z])([A-HJ-NP-V])(\\d{3})(\\d{3})\\.laz$",
+            Pattern.CASE_INSENSITIVE);
 
     // MGRS lettering, with the ambiguous I and O omitted.
     private static final String COLS_SET0 = "ABCDEFGH";   // zones where (zone-1)%3 == 0
@@ -65,9 +75,9 @@ public final class LazNameBounds {
         Matcher m = MGRS_TILE.matcher(line);
         if (!m.find()) return null;
         int zone = Integer.parseInt(m.group(1));
-        char band = m.group(2).charAt(0);
-        char col = m.group(3).charAt(0);
-        char row = m.group(4).charAt(0);
+        char band = Character.toUpperCase(m.group(2).charAt(0));
+        char col = Character.toUpperCase(m.group(3).charAt(0));
+        char row = Character.toUpperCase(m.group(4).charAt(0));
         double eastOff = Integer.parseInt(m.group(5)) * 100.0;   // 3 digits at 100 m
         double northOff = Integer.parseInt(m.group(6)) * 100.0;
 
@@ -146,7 +156,7 @@ public final class LazNameBounds {
     // ---- Projections: inverse Transverse Mercator + Lambert Conformal Conic ----
 
     /** A map projection that can be inverted to WGS84 lon/lat, with its native CRS identity. */
-    sealed interface Proj permits TmProj, LccProj {
+    sealed interface Proj permits TmProj, LccProj, AeaProj {
         double[] lonLat(double easting, double northing);
         /** EPSG code of the native horizontal CRS, e.g. {@code EPSG:26917}. */
         String epsg();
@@ -156,6 +166,10 @@ public final class LazNameBounds {
         static Proj utm(int zone) {
             return new TmProj(zone * 6 - 183, 0, 0.9996, 500_000,
                     26900 + zone, "NAD83 / UTM zone " + zone + "N");
+        }
+        /** UTM zone as Transverse-Mercator with an explicit EPSG (e.g. NAD83(2011) 6345/6346). */
+        static Proj utm(int zone, int epsgCode, String crs) {
+            return new TmProj(zone * 6 - 183, 0, 0.9996, 500_000, epsgCode, crs);
         }
     }
 
@@ -173,6 +187,51 @@ public final class LazNameBounds {
             return lccToLonLat(e, n, lon0, lat0, lat1, lat2, fe);
         }
         public String epsg() { return "EPSG:" + epsgCode; }
+    }
+
+    /** Albers Equal-Area Conic (e.g. NAD83 / Conus Albers). FE/FN as given. */
+    record AeaProj(double lon0, double lat0, double lat1, double lat2, double fe, double fn,
+                   int epsgCode, String crs) implements Proj {
+        public double[] lonLat(double e, double n) {
+            return aeaToLonLat(e, n, lon0, lat0, lat1, lat2, fe, fn);
+        }
+        public String epsg() { return "EPSG:" + epsgCode; }
+    }
+
+    /** Inverse Albers Equal-Area Conic (ellipsoidal): easting/northing (metres) -> {lonDeg, latDeg}. */
+    static double[] aeaToLonLat(double easting, double northing,
+                               double lon0deg, double lat0deg, double lat1deg, double lat2deg,
+                               double fe, double fn) {
+        double e = Math.sqrt(E2);
+        double lon0 = Math.toRadians(lon0deg), lat0 = Math.toRadians(lat0deg),
+               lat1 = Math.toRadians(lat1deg), lat2 = Math.toRadians(lat2deg);
+        double m1 = lccM(lat1, e), m2 = lccM(lat2, e);          // cosφ/√(1-e²sin²φ), shared with LCC
+        double q0 = aeaQ(lat0, e), q1 = aeaQ(lat1, e), q2 = aeaQ(lat2, e);
+        double n = (m1 * m1 - m2 * m2) / (q2 - q1);
+        double c = m1 * m1 + n * q1;
+        double rho0 = A * Math.sqrt(c - n * q0) / n;
+        double x = easting - fe, y = northing - fn;
+        double rho = Math.sqrt(x * x + (rho0 - y) * (rho0 - y));
+        double theta = Math.atan2(x, rho0 - y);                 // n > 0 for these CRSs
+        double q = (c - rho * rho * n * n / (A * A)) / n;
+        double phi = Math.asin(q / 2);                          // initial guess
+        for (int i = 0; i < 12; i++) {
+            double s = Math.sin(phi), oneMinus = 1 - E2 * s * s;
+            double dphi = oneMinus * oneMinus / (2 * Math.cos(phi))
+                    * (q / (1 - E2) - s / oneMinus
+                       + (1 / (2 * e)) * Math.log((1 - e * s) / (1 + e * s)));
+            phi += dphi;
+            if (Math.abs(dphi) < 1e-12) break;
+        }
+        double lon = lon0 + theta / n;
+        return new double[]{ Math.toDegrees(lon), Math.toDegrees(phi) };
+    }
+
+    /** Authalic-area function q(φ) used by the Albers equal-area projection. */
+    private static double aeaQ(double phi, double e) {
+        double s = Math.sin(phi);
+        return (1 - e * e) * (s / (1 - e * e * s * s)
+                - (1 / (2 * e)) * Math.log((1 - e * s) / (1 + e * s)));
     }
 
     /** Inverse Transverse Mercator: easting/northing (metres) -> {lonDeg, latDeg}, WGS84 ellipsoid. */
@@ -333,6 +392,132 @@ public final class LazNameBounds {
         int start = name.startsWith("USGS_LPC_") ? "USGS_LPC_".length() : 0;
         int lid = name.indexOf("_LID");
         return lid > start ? name.substring(start, lid) : null;
+    }
+
+    // ---- USGS "eNNNNnNNNN" / "wNNNNnNNNN" grid-indexed names ----
+    //
+    // Many 3DEP deliveries name a tile by its SW corner in the project's CRS, e.g.
+    //     USGS_LPC_FL_Panhandle_2018_B18_e0853n0913.laz   (CONUS Albers, e/n in km)
+    //     USGS_LPC_FL_GulfCoast_Topography_2018_w314000n3291500.laz   (UTM 16N, e/n in metres)
+    // The leading e/w is just a label (eastings are positive in all these zones). The value's
+    // unit is per-project and NOT inferable from the name (Southwest uses km easting but 100 m
+    // northing; GulfCoast uses raw metres), so each scheme below was read from, and verified
+    // against, the actual LAZ header bounds + CRS VLR. Only confirmed projects are decoded.
+
+    private static final Proj CONUS_ALBERS =
+            new AeaProj(-96, 23, 29.5, 45.5, 0, 0, 6350, "NAD83(2011) / Conus Albers");
+
+    /** Per-project grid: projection, easting/northing index multipliers (m), and tile size (m). */
+    private record EnScheme(Proj proj, double eMul, double nMul, double tileMetres) {}
+
+    private static final java.util.Map<String, EnScheme> EN_SCHEMES = java.util.Map.of(
+            "FL_Panhandle_2018_B18",               new EnScheme(CONUS_ALBERS, 1000, 1000, 1000),
+            "GA_Statewide_2018_B18_DRRA",          new EnScheme(CONUS_ALBERS, 1000, 1000, 1000),
+            "FL_Southeast_2018_D18_SUPPLEMENTAL",  new EnScheme(CONUS_ALBERS, 1000, 1000, 1000),
+            "FL_WestEvergladesNP_2018_B18",        new EnScheme(CONUS_ALBERS, 1000, 1000, 1000),
+            "FL_Southwest_2018_D18_SUPPLEMENTAL",  new EnScheme(CONUS_ALBERS, 1000,  100, 1000),
+            "FL_Panhandle_B3_2018",                new EnScheme(CONUS_ALBERS, 1000, 1000, 1000),
+            "FL_TopobathyFLKeysNOAA_2019_D20",
+                    new EnScheme(Proj.utm(17, 6346, "NAD83(2011) / UTM zone 17N"), 1000, 1000, 1000),
+            "FL_GulfCoast_Topography_2018",
+                    new EnScheme(Proj.utm(16, 6345, "NAD83(2011) / UTM zone 16N"), 1, 1, 500));
+
+    // ..._e0853n0913.laz   ..._w314000n3291500.laz   ..._e1039n0791_LAS_2019.laz
+    // (e/w label, easting digits, n, northing digits, optional trailing delivery code)
+    private static final Pattern EN_TILE =
+            Pattern.compile("_[ew](\\d{3,})n(\\d{3,})(?:_[A-Za-z]+_\\d+)?\\.laz$", Pattern.CASE_INSENSITIVE);
+
+    /** Decodes a USGS e/n grid-indexed name into a footprint, or {@code null}. */
+    static Matched parseEastNorth(String line) {
+        String name = line.substring(line.lastIndexOf('/') + 1);
+        Matcher m = EN_TILE.matcher(name);
+        if (!m.find()) return null;
+        int start = name.startsWith("USGS_LPC_") ? "USGS_LPC_".length() : 0;
+        if (m.start() <= start) return null;
+        String project = name.substring(start, m.start());
+        EnScheme sc = EN_SCHEMES.get(project);
+        if (sc == null) return null;                          // only confirmed grids
+        double e = Long.parseLong(m.group(1)) * sc.eMul();
+        double n = Long.parseLong(m.group(2)) * sc.nMul();
+        return new Matched(line, groupKey(line), sc.proj(), e, n, sc.tileMetres());
+    }
+
+    // ---- Florida State Plane names WITHOUT the "LID" token ----
+    //
+    // Some deliveries name a tile in State Plane feet but omit the "LID" token used above:
+    //   * Packed column/row index, same packing as the LID grids (idx = C - modulus*row + col
+    //     over 5000 ft tiles), keeping the zone letter or dropping it:
+    //       ..._038576_N.laz (FL North), ..._050300_E.laz (FL East), ..._471241.laz (FL West).
+    //   * SW corner in absolute State Plane feet: ..._692500_725000.laz (Palm Beach, FL East).
+    // Each project's zone, origin C and CRS was read from and verified against the LAZ headers.
+    // These are the NAD83(2011) ftUS realizations (same projection maths as the NAD83 zones above).
+    //
+    // Two superficially similar families are deliberately NOT decoded, because reading their
+    // headers showed the name does not map to a corner consistently: FL_Suwannee_River_Lidar_2016
+    // (no single C/modulus fits its index), and GA_SW_Georgia_..._B17 (the GAW/GAE corner field's
+    // scale differs between delivery blocks). Decoding them from the name would emit wrong extents.
+
+    private static final Proj FL_EAST_2011 =
+            new TmProj(-81, SP_TM_LAT0, SP_K0, SP_TM_FE, 6438, "NAD83(2011) / Florida East (ftUS)");
+    private static final Proj FL_WEST_2011 =
+            new TmProj(-82, SP_TM_LAT0, SP_K0, SP_TM_FE, 6442, "NAD83(2011) / Florida West (ftUS)");
+    private static final Proj FL_NORTH_2011 =
+            new LccProj(-84.5, 29.0, 30.75, 29 + 35.0 / 60.0, 600_000.0, 6441,
+                    "NAD83(2011) / Florida North (ftUS)");
+
+    /** A packed-index State Plane project: its zone projection, origin constant C, and index modulus. */
+    private record SpScheme(Proj proj, int c, int modulus) {}
+
+    // Keyed by "<project>|<zone suffix>" (suffix empty when the name carries none): the origin C
+    // is tied to the suffix, e.g. Upper Saint Johns numbers its "_E" and its unsuffixed tiles from
+    // different origins (149767 vs the East default 349767).
+    private static final java.util.Map<String, SpScheme> SP_SCHEMES = java.util.Map.of(
+            "FL_LeonCountyProcessing_2018_D18|N",    new SpScheme(FL_NORTH_2011, 104051, 540),
+            "FL_Upper_Saint_Johns_Lidar_2017_B17|E", new SpScheme(FL_EAST_2011,  149767, 300),
+            "FL_Upper_Saint_Johns_Lidar_2017_B17|",  new SpScheme(FL_EAST_2011,  349767, 300),
+            "FL_PeaceRiver_2014_C17|",               new SpScheme(FL_WEST_2011,  549701, 300));
+
+    private static final String PALM_BEACH = "FL_Palm_Beach_County_LiDAR_2016_B16";
+
+    private static final Pattern PB_TILE =                    // ..._692500_725000.laz
+            Pattern.compile("_(\\d{6})_(\\d{6})\\.laz$");
+    private static final Pattern SP_IDX_TILE =                // ..._038576_N.laz   ..._471241.laz
+            Pattern.compile("_(\\d{4,6})(?:_([EWN]))?\\.laz$");
+
+    /** Decodes a confirmed State Plane name lacking the LID token into a footprint, or {@code null}. */
+    static Matched parseStatePlane(String line) {
+        String name = line.substring(line.lastIndexOf('/') + 1);
+        Matcher m;
+        if ((m = PB_TILE.matcher(name)).find() && PALM_BEACH.equals(spProject(name, m.start()))) {
+            double e = Integer.parseInt(m.group(1)) * US_FOOT;          // absolute feet
+            double n = Integer.parseInt(m.group(2)) * US_FOOT;
+            return new Matched(line, groupKey(line), FL_EAST_2011, e, n, 2500 * US_FOOT);
+        }
+        if ((m = SP_IDX_TILE.matcher(name)).find()) {
+            String suffix = m.group(2) == null ? "" : m.group(2);
+            SpScheme sc = SP_SCHEMES.get(spProject(name, m.start()) + "|" + suffix);
+            if (sc == null) return null;                               // only confirmed grids
+            double[] sw = spIndexCorner(Integer.parseInt(m.group(1)), sc.c(), sc.modulus());
+            if (sw == null) return null;
+            return new Matched(line, groupKey(line), sc.proj(), sw[0], sw[1], 5000 * US_FOOT);
+        }
+        return null;
+    }
+
+    /** The {@code USGS_LPC_<project>} token preceding the coordinate suffix at {@code end}. */
+    private static String spProject(String name, int end) {
+        int start = name.startsWith("USGS_LPC_") ? "USGS_LPC_".length() : 0;
+        return end > start ? name.substring(start, end) : "";
+    }
+
+    /** Packed column/row index -> SW corner (metres) on a 5000 ft grid, or {@code null} if out of range. */
+    private static double[] spIndexCorner(int idx, int c, int modulus) {
+        int k = c - idx;
+        if (k <= 0) return null;
+        int row = (k + modulus - 1) / modulus;        // ceil(k / modulus)
+        int col = modulus * row - k;
+        if (col < 0 || col >= modulus) return null;
+        return new double[]{ col * 5000 * US_FOOT, row * 5000 * US_FOOT };
     }
 
     // ---- Per-project merge: union of grid cells -> WGS84 MULTIPOLYGON ----
@@ -561,41 +746,40 @@ public final class LazNameBounds {
      */
     record Matched(String line, String project, Proj proj, double swE, double swN, Double fixedTile) {}
 
+    /** Returns {@code args[i]} or exits with an error if the flag {@code flag} has no value. */
+    private static String requireArg(String[] args, int i, String flag) {
+        if (i >= args.length) { System.err.println(flag + " needs a value"); System.exit(2); }
+        return args[i];
+    }
+
     public static void main(String[] args) throws IOException {
         Path input = null, output = null, mergedOut = null;
         Double forcedTile = null;
         String prefix = null;
         for (int i = 0; i < args.length; i++) {
             String a = args[i];
-            if (a.equals("--tile")) {
-                if (i + 1 >= args.length) { System.err.println("--tile needs a value"); System.exit(2); }
-                forcedTile = Double.parseDouble(args[++i]);
-            } else if (a.equals("--merged")) {
-                if (i + 1 >= args.length) { System.err.println("--merged needs a file path"); System.exit(2); }
-                mergedOut = Path.of(args[++i]);
-            } else if (a.equals("--prefix")) {
-                if (i + 1 >= args.length) { System.err.println("--prefix needs a value"); System.exit(2); }
-                prefix = args[++i].replaceAll("/+$", "");   // base path prepended to the directory
-            } else if (input == null) {
-                input = Path.of(a);
-            } else if (output == null) {
-                output = Path.of(a);
-            } else {
-                System.err.println("Unexpected extra argument: " + a);
-                System.exit(2);
+            switch (a) {
+                case "--input", "-i" -> input = Path.of(requireArg(args, ++i, a));
+                case "--output", "-o" -> output = Path.of(requireArg(args, ++i, a));
+                case "--merged" -> mergedOut = Path.of(requireArg(args, ++i, a));
+                case "--tile" -> forcedTile = Double.parseDouble(requireArg(args, ++i, a));
+                case "--prefix" -> prefix = requireArg(args, ++i, a).replaceAll("/+$", "");
+                default -> { System.err.println("Unknown argument: " + a); System.exit(2); }
             }
         }
         if (input == null) {
-            System.err.println("Usage: java com.spotable.LazNameBounds <list.csv> [out.csv] [--tile <metres>] [--merged <file>]");
-            System.err.println("  Reads one USGS LPC path per line, writes \"<project>\",\"<filename>\",\"SRID=4326;POLYGON ((...))\"");
-            System.err.println("  for MGRS-gridded names (e.g. ..._17RNL070510.laz) and confirmed Florida State");
-            System.err.println("  Plane LID-gridded names (..._LID2019_447196_W.laz, North/Lambert _N, Osceola");
-            System.err.println("  quadrants _E_A, MiamiDade ..._313031_0901). Other forms are skipped.");
-            System.err.println("  Tile size is derived per project from the grid step in the list,");
-            System.err.println("  unless --tile forces a fixed size (metres) for every tile.");
+            System.err.println("Usage: java com.spotable.LazNameBounds --input <list.csv> [--output <bounds.csv>]");
+            System.err.println("                                       [--merged <file>] [--tile <metres>] [--prefix <base>]");
+            System.err.println("  --input   (-i) list of USGS LPC paths, one per line (required).");
+            System.err.println("  --output  (-o) per-tile CSV \"<project>\",\"<filename>\",\"SRID=4326;POLYGON ((...))\"");
+            System.err.println("                 (default: stdout). Decodes MGRS names (..._17RNL070510.laz), confirmed");
+            System.err.println("                 Florida State Plane LID names (..._LID2019_447196_W.laz, _N, _E_A, ...),");
+            System.err.println("                 e/n grids (..._e0853n0913.laz CONUS Albers, ..._w314000n3291500.laz UTM),");
+            System.err.println("                 and State Plane names without the LID token. Other forms are skipped.");
             System.err.println("  --merged  also write one row per sub-project:");
             System.err.println("            \"<project>\",\"<directory>\",\"<files>\",\"<year>\",\"<EPSG>\",\"<horizontal CRS>\",\"SRID=4326;MULTIPOLYGON(...)\"");
             System.err.println("            (the union of that group's tiles, gaps preserved, collinear vertices removed).");
+            System.err.println("  --tile    force a fixed tile size (metres) for every tile (default: derived per project).");
             System.err.println("  --prefix  base path (e.g. s3://bucket/point-cloud/us) prepended to the directory column.");
             System.exit(2);
             return;
@@ -617,6 +801,10 @@ public final class LazNameBounds {
                 }
                 Matched lid = parseLid(line);
                 if (lid != null) { matched.add(lid); continue; }
+                Matched en = parseEastNorth(line);
+                if (en != null) { matched.add(en); continue; }
+                Matched sp = parseStatePlane(line);
+                if (sp != null) { matched.add(sp); continue; }
                 skipped++;
             }
         }
