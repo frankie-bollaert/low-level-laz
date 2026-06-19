@@ -834,6 +834,10 @@ public final class LazNameBounds {
                 ? java.util.Map.of()
                 : deriveTileSizes(matched);
 
+        // Repair MGRS names whose 100 km easting/northing digits rolled over without the square
+        // letter advancing (e.g. ..._17RMJ000480.laz that belongs in square N at easting 500000).
+        matched = repairMgrsRollover(matched, tileByProject, forcedTile);
+
         // Per-tile output: a single CSV (--output) and/or one CSV per project (--partitioned).
         // Falls back to stdout only when neither destination is given.
         String header = TifNameBounds.csvRow("project", "filename", "geometry");
@@ -951,6 +955,67 @@ public final class LazNameBounds {
     }
 
     private static final double DEFAULT_TILE = 1500.0;
+
+    /** Width of an MGRS 100 km square, the amount a rolled-over easting/northing field is off by. */
+    private static final long MGRS_SQUARE = 100_000;
+
+    /**
+     * Repairs MGRS tiles whose easting/northing digits rolled over (e.g. {@code 990}&rarr;{@code 000})
+     * without the 100&nbsp;km square letter advancing, which would otherwise place them one square
+     * (100&nbsp;km) west or south of the project — e.g. {@code ..._17RMJ000480.laz} belongs in square
+     * N at easting 500000, not square M at 400000.
+     * <p>
+     * Only MGRS tiles are considered (they alone carry {@code fixedTile == null} and an SW corner on
+     * a 100&nbsp;km grid). Within each project + UTM zone, the valid extent is taken from the
+     * unambiguous tiles (whose offset is not an exact multiple of 100&nbsp;km); an offset-0 tile that
+     * falls outside that extent but lands inside it when shifted by one square is moved there.
+     */
+    static java.util.List<Matched> repairMgrsRollover(java.util.List<Matched> matched,
+            java.util.Map<String, Double> tileByProject, Double forcedTile) {
+        java.util.Map<String, java.util.List<Integer>> groups = new java.util.LinkedHashMap<>();
+        for (int i = 0; i < matched.size(); i++) {
+            Matched m = matched.get(i);
+            if (m.fixedTile() != null) continue;               // MGRS tiles only
+            groups.computeIfAbsent(m.project() + "|" + m.proj().epsg(),
+                    k -> new java.util.ArrayList<>()).add(i);
+        }
+        java.util.List<Matched> out = new java.util.ArrayList<>(matched);
+        for (var ge : groups.entrySet()) {
+            java.util.List<Integer> idxs = ge.getValue();
+            double margin = forcedTile != null ? forcedTile
+                    : tileByProject.getOrDefault(matched.get(idxs.get(0)).project(), DEFAULT_TILE);
+            // Extent from the unambiguous tiles (offset not on a 100 km line).
+            double eMin = Double.MAX_VALUE, eMax = -Double.MAX_VALUE;
+            double nMin = Double.MAX_VALUE, nMax = -Double.MAX_VALUE;
+            for (int i : idxs) {
+                Matched m = matched.get(i);
+                if (Math.round(m.swE()) % MGRS_SQUARE != 0) { eMin = Math.min(eMin, m.swE()); eMax = Math.max(eMax, m.swE()); }
+                if (Math.round(m.swN()) % MGRS_SQUARE != 0) { nMin = Math.min(nMin, m.swN()); nMax = Math.max(nMax, m.swN()); }
+            }
+            for (int i : idxs) {
+                Matched m = matched.get(i);
+                double e = m.swE(), n = m.swN();
+                if (Math.round(m.swE()) % MGRS_SQUARE == 0 && eMin <= eMax
+                        && outside(m.swE(), eMin, eMax, margin)
+                        && !outside(m.swE() + MGRS_SQUARE, eMin, eMax, margin)) {
+                    e = m.swE() + MGRS_SQUARE;
+                }
+                if (Math.round(m.swN()) % MGRS_SQUARE == 0 && nMin <= nMax
+                        && outside(m.swN(), nMin, nMax, margin)
+                        && !outside(m.swN() + MGRS_SQUARE, nMin, nMax, margin)) {
+                    n = m.swN() + MGRS_SQUARE;
+                }
+                if (e != m.swE() || n != m.swN()) {
+                    out.set(i, new Matched(m.line(), m.project(), m.proj(), e, n, m.fixedTile()));
+                }
+            }
+        }
+        return out;
+    }
+
+    private static boolean outside(double v, double lo, double hi, double margin) {
+        return v < lo - margin || v > hi + margin;
+    }
 
     /**
      * Tile size per project = the smallest positive gap between adjacent SW-corner grid lines
