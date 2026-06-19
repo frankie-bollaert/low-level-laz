@@ -313,16 +313,33 @@ public final class LazNameBounds {
     private static final Proj SP_NORTH =
             new LccProj(-84.5, 29.0, 30.75, 29 + 35.0 / 60.0, 600_000.0, 2238,
                     "NAD83 / Florida North ftUS");
-    /** Per-State-Plane-zone grid: default origin constant C, the index modulus, and projection. */
-    private record ZoneDef(int c, int modulus, Proj proj) {}
+    /** Per-State-Plane-zone grid: origin constant C, index modulus, column-window start, projection. */
+    private record ZoneDef(int c, int modulus, int colMin, Proj proj) {}
 
-    // The index modulus is the zone's column span (must exceed any tile's column so the index
-    // inverts uniquely): 300 for the TM zones, 540 for the wide North zone. C is the default
-    // grid origin per zone; some projects override it (see LID_SCHEMES).
+    // The packed index repeats every `modulus` columns, so the inverse must know which window of
+    // columns the zone actually occupies. The North zone's real columns run ~199..549 (5000 ft
+    // grid) which straddles modulus 540: its eastern tiles (col 540..549) would otherwise alias to
+    // col 0..9 and land hundreds of miles west, so its window starts at colMin=100 (in the empty
+    // 10..198 gap) instead of 0. The TM zones stay well under their 300 modulus, so colMin=0.
     private static final java.util.Map<Character, ZoneDef> LID_ZONES = java.util.Map.of(
-            'W', new ZoneDef(549701, 300, SP_WEST),
-            'E', new ZoneDef(349767, 300, SP_EAST),
-            'N', new ZoneDef(704051, 540, SP_NORTH));
+            'W', new ZoneDef(549701, 300, 0, SP_WEST),
+            'E', new ZoneDef(349767, 300, 0, SP_EAST),
+            'N', new ZoneDef(704051, 540, 100, SP_NORTH));
+
+    /**
+     * Inverts a packed LID index to its {@code {col, row}} on the 5000 ft grid, choosing the
+     * column inside the zone's window {@code [colMin, colMin + modulus)}, or {@code null} if the
+     * index is out of range. {@code idx = C - (modulus*row - col)}, so a column past the modulus
+     * aliases to a low column one row up; the window picks the geographically valid candidate.
+     */
+    private static int[] lidColRow(int idx, int c, int modulus, int colMin) {
+        int k = c - idx;
+        if (k <= 0) return null;
+        int row = (k + modulus - 1) / modulus;        // ceil(k / modulus); gives col in [0, modulus)
+        int col = modulus * row - k;
+        if (col < colMin) { col += modulus; row += 1; }   // lift into [colMin, colMin + modulus)
+        return new int[]{ col, row };
+    }
 
     /**
      * Per-project LID grid scheme (each verified against tile metadata):
@@ -372,11 +389,9 @@ public final class LazNameBounds {
         ZoneDef z = LID_ZONES.get(zone);
         if (z == null) return null;
         int c = sc.overrideC() != null ? sc.overrideC() : z.c();
-        int k = c - idx;
-        if (k <= 0) return null;
-        int row = (k + z.modulus() - 1) / z.modulus();        // ceil(k / modulus)
-        int col = z.modulus() * row - k;
-        if (col < 0 || col >= z.modulus()) return null;
+        int[] cr = lidColRow(idx, c, z.modulus(), z.colMin());
+        if (cr == null) return null;
+        int col = cr[0], row = cr[1];
 
         double e = col * 5000 * US_FOOT, n = row * 5000 * US_FOOT;
         if (quad != null) {                                   // 2500-ft quadrant of the parent
@@ -465,17 +480,20 @@ public final class LazNameBounds {
             new LccProj(-84.5, 29.0, 30.75, 29 + 35.0 / 60.0, 600_000.0, 6441,
                     "NAD83(2011) / Florida North (ftUS)");
 
-    /** A packed-index State Plane project: its zone projection, origin constant C, and index modulus. */
-    private record SpScheme(Proj proj, int c, int modulus) {}
+    /**
+     * A packed-index State Plane project: zone projection, origin constant C, index modulus, and
+     * the column-window start (see {@link #lidColRow}; 100 for the North zone, 0 for the TM zones).
+     */
+    private record SpScheme(Proj proj, int c, int modulus, int colMin) {}
 
     // Keyed by "<project>|<zone suffix>" (suffix empty when the name carries none): the origin C
     // is tied to the suffix, e.g. Upper Saint Johns numbers its "_E" and its unsuffixed tiles from
     // different origins (149767 vs the East default 349767).
     private static final java.util.Map<String, SpScheme> SP_SCHEMES = java.util.Map.of(
-            "FL_LeonCountyProcessing_2018_D18|N",    new SpScheme(FL_NORTH_2011, 104051, 540),
-            "FL_Upper_Saint_Johns_Lidar_2017_B17|E", new SpScheme(FL_EAST_2011,  149767, 300),
-            "FL_Upper_Saint_Johns_Lidar_2017_B17|",  new SpScheme(FL_EAST_2011,  349767, 300),
-            "FL_PeaceRiver_2014_C17|",               new SpScheme(FL_WEST_2011,  549701, 300));
+            "FL_LeonCountyProcessing_2018_D18|N",    new SpScheme(FL_NORTH_2011, 104051, 540, 100),
+            "FL_Upper_Saint_Johns_Lidar_2017_B17|E", new SpScheme(FL_EAST_2011,  149767, 300, 0),
+            "FL_Upper_Saint_Johns_Lidar_2017_B17|",  new SpScheme(FL_EAST_2011,  349767, 300, 0),
+            "FL_PeaceRiver_2014_C17|",               new SpScheme(FL_WEST_2011,  549701, 300, 0));
 
     private static final String PALM_BEACH = "FL_Palm_Beach_County_LiDAR_2016_B16";
 
@@ -497,9 +515,10 @@ public final class LazNameBounds {
             String suffix = m.group(2) == null ? "" : m.group(2);
             SpScheme sc = SP_SCHEMES.get(spProject(name, m.start()) + "|" + suffix);
             if (sc == null) return null;                               // only confirmed grids
-            double[] sw = spIndexCorner(Integer.parseInt(m.group(1)), sc.c(), sc.modulus());
-            if (sw == null) return null;
-            return new Matched(line, groupKey(line), sc.proj(), sw[0], sw[1], 5000 * US_FOOT);
+            int[] cr = lidColRow(Integer.parseInt(m.group(1)), sc.c(), sc.modulus(), sc.colMin());
+            if (cr == null) return null;
+            return new Matched(line, groupKey(line), sc.proj(),
+                    cr[0] * 5000 * US_FOOT, cr[1] * 5000 * US_FOOT, 5000 * US_FOOT);
         }
         return null;
     }
@@ -508,16 +527,6 @@ public final class LazNameBounds {
     private static String spProject(String name, int end) {
         int start = name.startsWith("USGS_LPC_") ? "USGS_LPC_".length() : 0;
         return end > start ? name.substring(start, end) : "";
-    }
-
-    /** Packed column/row index -> SW corner (metres) on a 5000 ft grid, or {@code null} if out of range. */
-    private static double[] spIndexCorner(int idx, int c, int modulus) {
-        int k = c - idx;
-        if (k <= 0) return null;
-        int row = (k + modulus - 1) / modulus;        // ceil(k / modulus)
-        int col = modulus * row - k;
-        if (col < 0 || col >= modulus) return null;
-        return new double[]{ col * 5000 * US_FOOT, row * 5000 * US_FOOT };
     }
 
     // ---- Per-project merge: union of grid cells -> WGS84 MULTIPOLYGON ----
