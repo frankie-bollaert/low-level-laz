@@ -48,8 +48,8 @@ public class LazNameBoundsTest {
     public void footprintMatchesMetadataBbox() {
         var t = LazNameBounds.parse("USGS_LPC_FL_2017FortDrum_C22_17RNL070510.laz");
         // SW corner (507000, 3051000) and NE (508500, 3052500) in lon/lat.
-        double[] sw = DtmNameBounds.Utm.toLonLat(507000.0, 3_051_000.0, 17);
-        double[] ne = DtmNameBounds.Utm.toLonLat(508500.0, 3_052_500.0, 17);
+        double[] sw = TifNameBounds.Utm.toLonLat(507000.0, 3_051_000.0, 17);
+        double[] ne = TifNameBounds.Utm.toLonLat(508500.0, 3_052_500.0, 17);
         // Nominal tile must bracket the metadata data-extent box.
         assertTrue(sw[0] <= -80.9264 + 1e-3);   // west <= metadata west
         assertTrue(ne[0] >= -80.9139 - 1e-3);   // east >= metadata east
@@ -115,9 +115,9 @@ public class LazNameBoundsTest {
 
     @Test
     public void generalTmInverseMatchesUtmForAUtmPoint() {
-        // The generic inverse-TM with UTM parameters must equal DtmNameBounds' UTM inverse.
+        // The generic inverse-TM with UTM parameters must equal TifNameBounds' UTM inverse.
         double[] a = LazNameBounds.Proj.utm(17).lonLat(507000.0, 3_051_000.0);
-        double[] b = DtmNameBounds.Utm.toLonLat(507000.0, 3_051_000.0, 17);
+        double[] b = TifNameBounds.Utm.toLonLat(507000.0, 3_051_000.0, 17);
         assertEquals(b[0], a[0], 1e-9);
         assertEquals(b[1], a[1], 1e-9);
     }

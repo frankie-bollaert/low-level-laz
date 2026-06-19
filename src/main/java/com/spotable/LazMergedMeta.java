@@ -172,7 +172,7 @@ public final class LazMergedMeta {
     }
 
     private static void writeRow(Writer out, List<String> fields) throws IOException {
-        String row = DtmNameBounds.csvRow(fields.toArray(new String[0]));
+        String row = TifNameBounds.csvRow(fields.toArray(new String[0]));
         if (out != null) { out.write(row); out.write('\n'); } else System.out.println(row);
     }
 

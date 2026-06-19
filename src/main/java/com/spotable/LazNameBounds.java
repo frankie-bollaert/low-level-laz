@@ -13,7 +13,7 @@ import java.util.regex.Pattern;
 /**
  * Derives a USGS LPC point-cloud tile's WGS84 footprint <em>from its filename alone</em>
  * for the MGRS-gridded naming form, and writes a CSV of {@code filename,geometry}. This is
- * the point-cloud counterpart to {@link DtmNameBounds}.
+ * the point-cloud counterpart to {@link TifNameBounds}.
  * <p>
  * It handles the "FortDrum-style" tile id, an MGRS grid reference embedded in the name:
  * <pre>
@@ -25,7 +25,7 @@ import java.util.regex.Pattern;
  * square at 100&nbsp;m precision (so {@code 070}&rarr;7000&nbsp;m E, {@code 510}&rarr;51000&nbsp;m N).
  * The 100&nbsp;km square is resolved to absolute UTM via the MGRS column/row lettering, the
  * SW corner plus a square {@link #tileMetres} tile is reprojected to lon/lat with
- * {@link DtmNameBounds.Utm}, and emitted as EWKT {@code SRID=4326;POLYGON ((...))}.
+ * {@link TifNameBounds.Utm}, and emitted as EWKT {@code SRID=4326;POLYGON ((...))}.
  * <p>
  * It also decodes two grid-indexed families whose corner is encoded in the project's own CRS,
  * each gated to projects verified against the actual LAZ header bounds + CRS VLR:
@@ -816,13 +816,13 @@ public final class LazNameBounds {
 
         try (Writer out = output != null
                 ? Files.newBufferedWriter(output, StandardCharsets.UTF_8) : null) {
-            String header = DtmNameBounds.csvRow("project", "filename", "geometry");
+            String header = TifNameBounds.csvRow("project", "filename", "geometry");
             if (out != null) { out.write(header); out.write('\n'); } else System.out.println(header);
             for (Matched mtc : matched) {
                 double tile = forcedTile != null
                         ? forcedTile
                         : tileByProject.getOrDefault(mtc.project(), DEFAULT_TILE);
-                String row = DtmNameBounds.csvRow(mtc.project(), mtc.line(),
+                String row = TifNameBounds.csvRow(mtc.project(), mtc.line(),
                         toWgs84Wkt(mtc.proj(), mtc.swE(), mtc.swN(), tile));
                 if (out != null) { out.write(row); out.write('\n'); }
                 else System.out.println(row);
@@ -844,7 +844,7 @@ public final class LazNameBounds {
                 byProject.computeIfAbsent(m.project(), k -> new java.util.ArrayList<>()).add(m);
             }
             try (Writer out = Files.newBufferedWriter(mergedOut, StandardCharsets.UTF_8)) {
-                out.write(DtmNameBounds.csvRow("project", "directory", "files", "year",
+                out.write(TifNameBounds.csvRow("project", "directory", "files", "year",
                         "horizontal_epsg", "horizontal_projection", "geometry"));
                 out.write('\n');
                 for (var e : byProject.entrySet()) {
@@ -857,7 +857,7 @@ public final class LazNameBounds {
                     java.util.TreeSet<String> epsg = new java.util.TreeSet<>();
                     java.util.TreeSet<String> crs = new java.util.TreeSet<>();
                     for (Matched m : g) { epsg.add(m.proj().epsg()); crs.add(m.proj().crs()); }
-                    out.write(DtmNameBounds.csvRow(e.getKey(), directory,
+                    out.write(TifNameBounds.csvRow(e.getKey(), directory,
                             Integer.toString(g.size()), year(e.getKey(), g.get(0).line()),
                             String.join("; ", epsg), String.join("; ", crs), mergedWkt(g, tile)));
                     out.write('\n');

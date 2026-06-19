@@ -155,4 +155,4 @@ are also skipped. The run prints the converted/skipped counts to stderr.
 
 - `com.spotable.LazBinaryReader` — read the true bounding box / CRS / point count from one or more
   LAS/LAZ files (local, directory, glob, or `s3://`), via ranged GETs. Used by step 2.
-- `com.spotable.DtmNameBounds` / `com.spotable.TifBinaryReader` — the DTM (raster) counterparts.
+- `com.spotable.TifNameBounds` / `com.spotable.TifBinaryReader` — the DTM (raster) counterparts.

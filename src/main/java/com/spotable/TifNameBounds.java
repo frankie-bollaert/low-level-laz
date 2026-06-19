@@ -37,7 +37,7 @@ import java.util.regex.Pattern;
  * The four UTM corners are inverse-projected to geographic lon/lat with {@link Utm} (WGS84
  * ellipsoid) and emitted as EWKT {@code SRID=4326;POLYGON ((...))}, matching {@link TifBinaryReader}.
  */
-public final class DtmNameBounds {
+public final class TifNameBounds {
 
     /** USGS tile side length in metres (nominal 10 km block). */
     private static final double TILE = 10_000.0;
@@ -77,7 +77,7 @@ public final class DtmNameBounds {
             Map.entry("FL_SuwanneeRiver_2017", 17),
             Map.entry("FL_Upper_Saint_Johns_2017", 17));
 
-    private DtmNameBounds() {}
+    private TifNameBounds() {}
 
     /** Resolved tile: UTM zone plus integer NW-corner indices (in units of {@link #TILE}). */
     record Tile(int zone, int xi, int yi) {}
@@ -158,7 +158,7 @@ public final class DtmNameBounds {
             }
         }
         if (input == null) {
-            System.err.println("Usage: java com.spotable.DtmNameBounds <dtm.txt> [out.csv]");
+            System.err.println("Usage: java com.spotable.TifNameBounds <dtm.txt> [out.csv]");
             System.err.println("  Reads one USGS DEM path per line and writes CSV rows:");
             System.err.println("    \"<filename>\",\"SRID=4326;POLYGON ((...))\"");
             System.err.println("  Writes to <out.csv> if given, otherwise to stdout.");

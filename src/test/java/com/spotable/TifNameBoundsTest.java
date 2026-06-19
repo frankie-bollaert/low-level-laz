@@ -6,11 +6,11 @@ import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
-public class DtmNameBoundsTest {
+public class TifNameBoundsTest {
 
     @Test
     public void parsesModernNameWithExplicitZone() {
-        var t = DtmNameBounds.parse(
+        var t = TifNameBounds.parse(
                 "FL_WestEvergladesNP_2018_B18/TIFF/USGS_1M_17_x44y286_FL_WestEvergladesNP_2018_B18.tif");
         assertEquals(17, t.zone());
         assertEquals(44, t.xi());
@@ -20,21 +20,21 @@ public class DtmNameBoundsTest {
     @Test
     public void resolvesLegacyZoneFromProjectMap() {
         // USGS_one_meter_ / USGS_1m_ omit the zone; it comes from the project's CRS map.
-        var osceola = DtmNameBounds.parse(
+        var osceola = TifNameBounds.parse(
                 "FL_Osceola_2015/TIFF/USGS_one_meter_x43y313_FL_Osceola_2015.tif");
         assertEquals(17, osceola.zone());
         assertEquals(43, osceola.xi());
         assertEquals(313, osceola.yi());
 
-        var choctaw = DtmNameBounds.parse(
+        var choctaw = TifNameBounds.parse(
                 "FL_Lower_Choctawhatchee_2017/TIFF/USGS_1m_x60y337_FL_Lower_Choctawhatchee_2017.tif");
         assertEquals(16, choctaw.zone());
     }
 
     @Test
     public void returnsNullForUnknownName() {
-        assertNull(DtmNameBounds.parse("something/random/file.tif"));
-        assertNull(DtmNameBounds.parse("UNMAPPED_Project/TIFF/USGS_one_meter_x10y20_UNMAPPED_Project.tif"));
+        assertNull(TifNameBounds.parse("something/random/file.tif"));
+        assertNull(TifNameBounds.parse("UNMAPPED_Project/TIFF/USGS_one_meter_x10y20_UNMAPPED_Project.tif"));
     }
 
     /**
@@ -45,7 +45,7 @@ public class DtmNameBoundsTest {
      */
     @Test
     public void inverseUtmMatchesGdalCorner() {
-        double[] ll = DtmNameBounds.Utm.toLonLat(430000.0, 3120000.0, 17);
+        double[] ll = TifNameBounds.Utm.toLonLat(430000.0, 3120000.0, 17);
         double expectedLon = -(81 + 42.0 / 60 + 48.03 / 3600);  // ~ -81.713342
         double expectedLat = 28 + 12.0 / 60 + 13.98 / 3600;     //  ~ 28.203883
         // 6 m collar -> < 1e-4 deg; allow a small tolerance for that plus datum.
@@ -55,9 +55,9 @@ public class DtmNameBoundsTest {
 
     @Test
     public void emitsWgs84EwktPolygon() {
-        var t = DtmNameBounds.parse(
+        var t = TifNameBounds.parse(
                 "FL_Osceola_2015/TIFF/USGS_one_meter_x43y313_FL_Osceola_2015.tif");
-        String wkt = DtmNameBounds.toWgs84Wkt(t);
+        String wkt = TifNameBounds.toWgs84Wkt(t);
         assertTrue(wkt, wkt.startsWith("SRID=4326;POLYGON (("));
         assertTrue(wkt, wkt.endsWith("))"));
         // Closed ring: 5 coordinate pairs (SW, SE, NE, NW, SW).
