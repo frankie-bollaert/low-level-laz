@@ -28,20 +28,21 @@ import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.S3Object;
 
 /**
- * Reads only the 2D bounding box (min/max X and Y) from a LAS or LAZ file.
+ * Reads header-only metadata from a LAS or LAZ file: the 2D bounding box (min/max X and Y),
+ * the point count, the horizontal CRS, its linear unit, and the vertical CRS.
  * <p>
  * A LAZ file begins with the same uncompressed LAS public header block as a
- * plain LAS file — only the point records that follow are compressed. The
- * bounding box lives at fixed offsets in that header, so we can read it without
- * touching (or decompressing) any point data: just the first {@value #BYTES_NEEDED}
- * bytes of the file.
+ * plain LAS file — only the point records that follow are compressed. Everything
+ * read here lives in that header and its Variable Length Records, so we never
+ * touch (or decompress) any point data.
  * <p>
- * Because only the first few hundred bytes are needed, remote objects on S3 are
- * read with a single ranged GET — no full download, even for multi-gigabyte tiles.
+ * Because only the leading bytes are needed, remote objects on S3 are read with a
+ * single ranged GET — no full download, even for multi-gigabyte tiles.
  * <p>
  * The coordinate reference system, when declared in the file's projection VLR
- * (GeoTIFF GeoKeys or an OGC WKT VLR), is also extracted so the bounding box can
- * be emitted as georeferenced EWKT ({@code SRID=<epsg>;POLYGON(...)}).
+ * (GeoTIFF GeoKeys or an OGC WKT VLR), is extracted so the bounding box can be
+ * emitted as georeferenced EWKT ({@code SRID=<epsg>;POLYGON(...)}); the linear
+ * unit (used to report area in metres) and the vertical CRS come from the same VLR.
  */
 public class LazBinaryReader {
 

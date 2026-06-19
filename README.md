@@ -4,7 +4,8 @@ Tools for deriving USGS LPC point-cloud (LAZ) tile footprints and metadata, most
 **from the file name alone**, plus a second pass that reads a small sample of real
 file headers from S3 to attach measured point density and the vertical CRS.
 
-The pipeline turns a flat list of object paths into two CSVs:
+The pipeline turns a flat list of object paths into three CSVs (step 1 can also split the
+per-tile rows into one CSV per project — see `--partitioned`):
 
 - `laz_bounds.csv` — one WGS84 footprint per tile (name-derived, no network).
 - `laz_merged.csv` — one row per sub-project: merged footprint + horizontal CRS (name-derived).
@@ -85,7 +86,7 @@ Names that can't be decoded to a footprint are skipped and counted on stderr (se
 ### Step 2 — enrich with vertical CRS + point density (reads S3)
 
 ```sh
-AWS_PROFILE=west java -cp "$JAR" com.spotable.LazMergedMeta \
+AWS_PROFILE=west java -cp "$JAR" com.spotable.LazByProject \
     --merged laz_merged.csv \
     --bounds laz_bounds.csv \
     --output laz_merged_meta.csv \
@@ -129,7 +130,7 @@ java -cp "$JAR" com.spotable.LazNameBounds --input point-cloud.csv --output laz_
     --merged laz_merged.csv --prefix "$PREFIX"
 
 # 2. + vertical CRS & density (reads headers from S3)
-AWS_PROFILE=west java -cp "$JAR" com.spotable.LazMergedMeta \
+AWS_PROFILE=west java -cp "$JAR" com.spotable.LazByProject \
     --merged laz_merged.csv --bounds laz_bounds.csv --output laz_merged_meta.csv \
     --prefix "$PREFIX" --sample 5
 ```

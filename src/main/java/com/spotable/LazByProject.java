@@ -16,29 +16,34 @@ import software.amazon.awssdk.services.s3.S3Client;
 
 /**
  * Second pass over {@link LazNameBounds}'s {@code --merged} output: copies each sub-project row and
- * appends measured point-density figures, leaving the existing columns (including the horizontal
- * projection) untouched.
+ * appends measurements read from the actual point files, leaving the existing columns (including the
+ * horizontal projection) untouched and moving {@code geometry} to the end.
  * <p>
- * The name-based merge can describe a project's footprint and CRS, but not how dense the cloud is —
- * that lives in the point files. For each project we sample a handful of its tiles, read only the
- * LAS/LAZ <em>header</em> of each from S3 (a ranged GET, no point decompression), and from the
- * declared point count and bounding box compute the tile's average density,
- * {@code points / area}. The CRS's linear unit is honoured so the area is always in square metres.
- * The per-project figure reported is the <em>median</em> over the sampled tiles, which is robust to
- * the occasional sparse edge tile.
+ * The name-based merge describes a project's footprint and horizontal CRS, but not its vertical CRS
+ * or how dense the cloud is — those live in the point files. For each project we sample a handful of
+ * its tiles and read only the LAS/LAZ <em>header</em> of each from S3 (a ranged GET, no point
+ * decompression). From the declared point count and bounding box we compute the tile's density,
+ * {@code points / area} (the CRS's linear unit is honoured so the area is always in square metres),
+ * and we read the vertical CRS from the header. The per-project density is the <em>median</em> over
+ * the sampled tiles (robust to a sparse edge tile); the vertical CRS is the most common seen.
  * <p>
- * Two columns are added: {@code point_density_per_m2} (points per m&sup2;) and
- * {@code avg_point_spacing_m} (nominal ground sample distance, {@code 1/sqrt(density)}).
+ * Four columns are appended, then {@code geometry} (kept last):
+ * <ul>
+ *   <li>{@code vertical_epsg} / {@code vertical_projection} — the file's vertical CRS
+ *       (e.g. {@code EPSG:5703}, {@code NAVD88 height (metre)}).</li>
+ *   <li>{@code point_density_per_m2} — median points per m&sup2;.</li>
+ *   <li>{@code avg_point_spacing_m} — nominal ground sample distance, {@code 1/sqrt(density)}.</li>
+ * </ul>
  * <pre>
- *   java com.spotable.LazMergedMeta --merged laz_merged.csv --bounds laz_bounds.csv \
+ *   java com.spotable.LazByProject --merged laz_merged.csv --bounds laz_bounds.csv \
  *       --output laz_merged_meta.csv --prefix s3://bucket/point-cloud/us --sample 5
  * </pre>
  * The tile keys come from {@code --bounds} (its {@code filename} column, joined to each merged
  * row by the shared {@code project} key); {@code --prefix} is prepended to form the S3 URI.
  */
-public final class LazMergedMeta {
+public final class LazByProject {
 
-    private LazMergedMeta() {}
+    private LazByProject() {}
 
     public static void main(String[] args) throws IOException {
         Path merged = null, bounds = null, output = null;
@@ -56,7 +61,7 @@ public final class LazMergedMeta {
             }
         }
         if (merged == null || bounds == null) {
-            System.err.println("Usage: java com.spotable.LazMergedMeta --merged <merged.csv> --bounds <bounds.csv>");
+            System.err.println("Usage: java com.spotable.LazByProject --merged <merged.csv> --bounds <bounds.csv>");
             System.err.println("                                       [--output <out.csv>] [--prefix <base>] [--sample <N>]");
             System.err.println("  --merged  the per-project CSV from LazNameBounds --merged (required, input).");
             System.err.println("  --bounds  the per-tile CSV from LazNameBounds (required); supplies the sample file keys.");

@@ -11,9 +11,9 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Derives a USGS LPC point-cloud tile's WGS84 footprint <em>from its filename alone</em>
- * for the MGRS-gridded naming form, and writes a CSV of {@code filename,geometry}. This is
- * the point-cloud counterpart to {@link TifNameBounds}.
+ * Derives a USGS LPC point-cloud tile's WGS84 footprint <em>from its filename alone</em>,
+ * across several USGS LPC naming families, and writes a CSV of {@code project, filename and
+ * geometry}. This is the point-cloud counterpart to {@link TifNameBounds}.
  * <p>
  * It handles the "FortDrum-style" tile id, an MGRS grid reference embedded in the name:
  * <pre>
@@ -24,10 +24,10 @@ import java.util.regex.Pattern;
  * row L), and {@code 070}/{@code 510} are the SW-corner easting/northing <em>within</em> that
  * square at 100&nbsp;m precision (so {@code 070}&rarr;7000&nbsp;m E, {@code 510}&rarr;51000&nbsp;m N).
  * The 100&nbsp;km square is resolved to absolute UTM via the MGRS column/row lettering, the
- * SW corner plus a square {@link #tileMetres} tile is reprojected to lon/lat with
- * {@link TifNameBounds.Utm}, and emitted as EWKT {@code SRID=4326;POLYGON ((...))}.
+ * SW corner plus a square tile is reprojected to lon/lat with this class's own inverse
+ * projections ({@link Proj}), and emitted as EWKT {@code SRID=4326;POLYGON ((...))}.
  * <p>
- * It also decodes two grid-indexed families whose corner is encoded in the project's own CRS,
+ * It also decodes three grid-indexed families whose corner is encoded in the project's own CRS,
  * each gated to projects verified against the actual LAZ header bounds + CRS VLR:
  * <ul>
  *   <li>Florida State Plane LID grids ({@code ..._LID2019_447196_W.laz}); see {@link #parseLid}.</li>
@@ -39,7 +39,8 @@ import java.util.regex.Pattern;
  * </ul>
  * Other LPC naming families in the wild are out of scope here and are skipped (logged to
  * stderr): EPT octree-node keys ({@code ept-data/12-339-2750-2044.laz}, geometry not in the
- * name), and unverified per-project schemes such as {@code 692500_725000}, {@code GAW_20100945}.
+ * name), and unverified per-project schemes whose index does not map to a corner consistently
+ * (e.g. {@code GAW_20100945} Georgia, and {@code FL_Suwannee_River_Lidar_2016}).
  * <p>
  * The tile size is a project property the single name can't carry, so it is derived per
  * project from the minimum grid step among that project's tiles in the input list (e.g.
