@@ -2,6 +2,7 @@ package com.spotable;
 
 import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.OutputStreamWriter;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -55,8 +56,8 @@ final class ByProject {
     }
 
     static void run(String[] args, Spec spec) throws IOException {
-        Path merged = null, bounds = null, output = null;
-        String prefix = null;
+        Path merged = null, bounds = null, output = null, convert = null;
+        String prefix = null, format = null;
         int sample = 5;
         for (int i = 0; i < args.length; i++) {
             String a = args[i];
@@ -66,9 +67,28 @@ final class ByProject {
                 case "--output", "-o" -> output = Path.of(requireArg(args, ++i, a));
                 case "--prefix" -> prefix = requireArg(args, ++i, a).replaceAll("/+$", "");
                 case "--sample" -> sample = Integer.parseInt(requireArg(args, ++i, a));
+                case "--format" -> format = requireArg(args, ++i, a);
+                case "--convert" -> convert = Path.of(requireArg(args, ++i, a));
                 default -> { System.err.println("Unknown argument: " + a); System.exit(2); }
             }
         }
+        if (format != null && !format.equalsIgnoreCase("csv") && !format.equalsIgnoreCase("geojson")) {
+            System.err.println("--format must be csv or geojson"); System.exit(2); return;
+        }
+        // Default the format from --format, else infer from a .geojson/.json output name, else CSV.
+        boolean geojson = format != null ? format.equalsIgnoreCase("geojson") : isGeoJsonName(output);
+
+        // Conversion mode: re-serialise an existing by-project CSV in the chosen format (no S3,
+        // no re-sampling) — the rows already carry the measured columns and the geometry.
+        if (convert != null) {
+            List<String> columns = new ArrayList<>();
+            List<List<String>> rows = readCsv(convert, columns);
+            writeOutput(columns, rows, output, geojson);
+            System.err.println("Wrote " + rows.size() + (geojson ? " features" : " rows")
+                    + (output != null ? " to " + output : ""));
+            return;
+        }
+
         if (merged == null || bounds == null) {
             usage(spec);
             System.exit(2);
@@ -88,39 +108,79 @@ final class ByProject {
             }
         }
 
-        String[] appended = appendedColumns(spec);
-        boolean needsS3 = prefix != null && prefix.startsWith("s3://");
-        int done = 0, total;
-        try (S3Client s3 = needsS3 ? S3Client.create() : null;
-             BufferedReader in = Files.newBufferedReader(merged, StandardCharsets.UTF_8);
-             Writer out = output != null
-                     ? Files.newBufferedWriter(output, StandardCharsets.UTF_8) : null) {
-
+        // Read the merged rows up front; geometry moves to the end and the new columns sit before it.
+        List<String> columns;
+        int geomIdx = -1;
+        List<String[]> mergedRows = new ArrayList<>();
+        try (BufferedReader in = Files.newBufferedReader(merged, StandardCharsets.UTF_8)) {
             String header = in.readLine();
             if (header == null) { System.err.println("Empty merged file"); System.exit(2); return; }
-            int geomIdx = parseCsv(header).indexOf("geometry");
-            // New columns sit after the existing ones; geometry is moved to the very end.
-            writeRow(out, reorder(parseCsv(header), geomIdx, appended));
-
-            List<String[]> rows = new ArrayList<>();
+            List<String> mergedCols = parseCsv(header);
+            geomIdx = mergedCols.indexOf("geometry");
+            columns = reorder(mergedCols, geomIdx, appendedColumns(spec));
             String line;
             while ((line = in.readLine()) != null) {
-                if (!line.isBlank()) rows.add(parseCsv(line).toArray(new String[0]));
+                if (!line.isBlank()) mergedRows.add(parseCsv(line).toArray(new String[0]));
             }
-            total = rows.size();
-            for (String[] row : rows) {
+        }
+
+        List<List<String>> outRows = new ArrayList<>();
+        int done = 0, total = mergedRows.size();
+        boolean needsS3 = prefix != null && prefix.startsWith("s3://");
+        try (S3Client s3 = needsS3 ? S3Client.create() : null) {
+            for (String[] row : mergedRows) {
                 String project = row.length > 0 ? row[0] : "";
                 Sample s = sampleProject(s3, prefix, filesByProject.getOrDefault(project, List.of()), sample, spec);
                 MetricView view = spec.render(s.metric());
                 List<String> cells = new ArrayList<>(List.of(s.verticalEpsg(), s.verticalName()));
                 cells.addAll(view.cells());
-                writeRow(out, reorder(List.of(row), geomIdx, cells.toArray(new String[0])));
+                outRows.add(reorder(List.of(row), geomIdx, cells.toArray(new String[0])));
                 System.err.printf(Locale.ROOT, "  [%d/%d] %-44s vert=%-9s %s%n",
                         ++done, total, project, s.verticalEpsg().isEmpty() ? "?" : s.verticalEpsg(),
                         view.summary());
             }
         }
-        System.err.println("Wrote " + done + " rows" + (output != null ? " to " + output : ""));
+        writeOutput(columns, outRows, output, geojson);
+        System.err.println("Wrote " + done + (geojson ? " features" : " rows")
+                + (output != null ? " to " + output : ""));
+    }
+
+    /** Whether a path's name ends with a GeoJSON extension ({@code .geojson}/{@code .json}). */
+    private static boolean isGeoJsonName(Path p) {
+        if (p == null) return false;
+        String n = p.getFileName().toString().toLowerCase(Locale.ROOT);
+        return n.endsWith(".geojson") || n.endsWith(".json");
+    }
+
+    /** Reads a CSV file, collecting its header into {@code columns} and returning the data rows. */
+    private static List<List<String>> readCsv(Path csv, List<String> columns) throws IOException {
+        List<List<String>> rows = new ArrayList<>();
+        try (BufferedReader in = Files.newBufferedReader(csv, StandardCharsets.UTF_8)) {
+            String header = in.readLine();
+            if (header == null) return rows;
+            columns.addAll(parseCsv(header));
+            String line;
+            while ((line = in.readLine()) != null) {
+                if (!line.isBlank()) rows.add(parseCsv(line));
+            }
+        }
+        return rows;
+    }
+
+    /** Writes {@code rows} (with {@code columns}) to {@code output} (or stdout) as CSV or GeoJSON. */
+    private static void writeOutput(List<String> columns, List<List<String>> rows, Path output,
+                                    boolean geojson) throws IOException {
+        try (Writer out = output != null
+                ? Files.newBufferedWriter(output, StandardCharsets.UTF_8) : null) {
+            if (geojson) {
+                Writer w = out != null ? out : new OutputStreamWriter(System.out, StandardCharsets.UTF_8);
+                GeoJson.writeFeatureCollection(columns, rows, w);
+                w.flush();
+            } else {
+                writeRow(out, columns);
+                for (List<String> row : rows) writeRow(out, row);
+            }
+        }
     }
 
     /** {@link #VERTICAL_COLUMNS} followed by the spec's metric columns, as a {@code reorder} arg. */
@@ -162,14 +222,17 @@ final class ByProject {
         List<String> allColumns = new ArrayList<>(VERTICAL_COLUMNS);
         allColumns.addAll(spec.metricColumns());
         System.err.println("Usage: java com.spotable." + tool + " --merged <merged.csv> --bounds <bounds.csv>");
-        System.err.println(pad + "[--output <out.csv>] [--prefix <base>] [--sample <N>]");
+        System.err.println(pad + "[--output <out>] [--format csv|geojson] [--prefix <base>] [--sample <N>]");
         System.err.println("  --merged  the per-project CSV from " + source + " --merged (required, input).");
         System.err.println("  --bounds  the per-tile CSV from " + source + " (required); supplies the sample file keys.");
-        System.err.println("  --output  (-o) destination CSV (default: stdout). Copies --merged and appends");
+        System.err.println("  --output  (-o) destination file (default: stdout). Copies --merged and appends");
         System.err.println("                " + String.join(", ", allColumns) + " (geometry kept last),");
         System.err.println("                measured from N sampled tiles per project.");
+        System.err.println("  --format  csv (default) or geojson; inferred as geojson from a .geojson/.json --output.");
         System.err.println("  --prefix  base path prepended to each sampled filename to form its s3:// URI.");
         System.err.println("  --sample  tiles to sample per project (default 5); headers read via ranged GET.");
+        System.err.println("  --convert re-serialise an already-written by-project CSV in --format (no S3/sampling);");
+        System.err.println("            use instead of --merged/--bounds, e.g. --convert out.csv -o out.geojson.");
     }
 
     // ---- shared helpers ----

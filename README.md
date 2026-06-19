@@ -118,6 +118,26 @@ avg_point_spacing_m, geometry` (geometry kept last).
 `--prefix` is prepended to each sampled `filename` to form the S3 URI; it must point at the
 same base used in step 1.
 
+#### GeoJSON output
+
+Both `LazByProject` and `TifByProject` can emit a GeoJSON `FeatureCollection` instead of CSV — the
+rows are already WGS84, so each becomes a `Feature` (the `geometry` column is the geometry; the
+other columns are typed `properties`, with numbers bare and an absent vertical CRS as `null`). Pass
+`--format geojson`, or just give a `.geojson`/`.json` `--output`:
+
+```sh
+AWS_PROFILE=west java -cp "$JAR" com.spotable.LazByProject \
+    --merged meta/laz-merged.csv --bounds meta/laz-bounds.csv \
+    --output meta/laz-by-project.geojson --prefix "$PREFIX" --sample 5
+```
+
+To convert an **already-written** by-project CSV without re-reading S3, use `--convert`:
+
+```sh
+java -cp "$JAR" com.spotable.LazByProject --convert meta/laz-by-project.csv -o meta/laz-by-project.geojson
+java -cp "$JAR" com.spotable.TifByProject --convert meta/tif-by-project.csv -o meta/tif-by-project.geojson
+```
+
 ## Quick reference
 
 ```sh
