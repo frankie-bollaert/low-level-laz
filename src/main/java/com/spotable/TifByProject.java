@@ -51,11 +51,11 @@ public final class TifByProject {
         for (int i = 0; i < args.length; i++) {
             String a = args[i];
             switch (a) {
-                case "--merged" -> merged = Path.of(requireArg(args, ++i, a));
-                case "--bounds" -> bounds = Path.of(requireArg(args, ++i, a));
-                case "--output", "-o" -> output = Path.of(requireArg(args, ++i, a));
-                case "--prefix" -> prefix = requireArg(args, ++i, a).replaceAll("/+$", "");
-                case "--sample" -> sample = Integer.parseInt(requireArg(args, ++i, a));
+                case "--merged" -> merged = Path.of(LazByProject.requireArg(args, ++i, a));
+                case "--bounds" -> bounds = Path.of(LazByProject.requireArg(args, ++i, a));
+                case "--output", "-o" -> output = Path.of(LazByProject.requireArg(args, ++i, a));
+                case "--prefix" -> prefix = LazByProject.requireArg(args, ++i, a).replaceAll("/+$", "");
+                case "--sample" -> sample = Integer.parseInt(LazByProject.requireArg(args, ++i, a));
                 default -> { System.err.println("Unknown argument: " + a); System.exit(2); }
             }
         }
@@ -96,7 +96,7 @@ public final class TifByProject {
             String header = in.readLine();
             if (header == null) { System.err.println("Empty merged file"); System.exit(2); return; }
             int geomIdx = LazByProject.parseCsv(header).indexOf("geometry");
-            writeRow(out, reorder(LazByProject.parseCsv(header), geomIdx,
+            LazByProject.writeRow(out, LazByProject.reorder(LazByProject.parseCsv(header), geomIdx,
                     "vertical_epsg", "vertical_projection", "resolution_m"));
 
             List<String[]> rows = new ArrayList<>();
@@ -110,7 +110,7 @@ public final class TifByProject {
                 Meta meta = sampleMeta(s3, prefix, filesByProject.getOrDefault(project, List.of()), sample);
                 String res = Double.isNaN(meta.resolution()) ? ""
                         : String.format(Locale.ROOT, "%.4f", meta.resolution());
-                writeRow(out, reorder(List.of(row), geomIdx,
+                LazByProject.writeRow(out, LazByProject.reorder(List.of(row), geomIdx,
                         meta.verticalEpsg(), meta.verticalCrs(), res));
                 System.err.printf(Locale.ROOT, "  [%d/%d] %-44s vert=%-9s resolution=%s%n",
                         ++done, total, project, meta.verticalEpsg().isEmpty() ? "?" : meta.verticalEpsg(),
@@ -133,11 +133,10 @@ public final class TifByProject {
         List<String> vEpsgs = new ArrayList<>(), vNames = new ArrayList<>();
         int step = Math.max(1, files.size() / sample);
         for (int i = 0; i < files.size() && resolutions.size() < sample; i += step) {
-            String key = (prefix + "/" + files.get(i).replaceAll("^/+", "")).substring("s3://".length());
-            int slash = key.indexOf('/');
-            if (slash < 0) continue;
+            Sources.S3Ref ref = Sources.parseS3(prefix + "/" + files.get(i).replaceAll("^/+", ""));
+            if (ref == null) continue;
             try {
-                TifBinaryReader t = TifBinaryReader.readS3(s3, key.substring(0, slash), key.substring(slash + 1));
+                TifBinaryReader t = TifBinaryReader.readS3(s3, ref.bucket(), ref.key());
                 if (!Double.isNaN(t.resolutionMetres) && t.resolutionMetres > 0) resolutions.add(t.resolutionMetres);
                 if (t.verticalEpsg != null) vEpsgs.add("EPSG:" + t.verticalEpsg);
                 if (t.verticalCrs != null) vNames.add(t.verticalCrs);
@@ -145,40 +144,7 @@ public final class TifByProject {
                 // skip unreadable / missing tiles; keep sampling the rest
             }
         }
-        return new Meta(median(resolutions), mostCommon(vEpsgs), mostCommon(vNames));
-    }
-
-    /** The most frequently seen value, or {@code ""} if none. */
-    private static String mostCommon(List<String> values) {
-        Map<String, Integer> counts = new LinkedHashMap<>();
-        for (String v : values) counts.merge(v, 1, Integer::sum);
-        return counts.entrySet().stream().max(Map.Entry.comparingByValue())
-                .map(Map.Entry::getKey).orElse("");
-    }
-
-    /** Drops {@code geomIdx} from {@code base}, appends {@code extra} and re-appends geometry last. */
-    private static List<String> reorder(List<String> base, int geomIdx, String... extra) {
-        List<String> out = new ArrayList<>(base);
-        String geom = geomIdx >= 0 && geomIdx < out.size() ? out.remove(geomIdx) : "";
-        out.addAll(List.of(extra));
-        out.add(geom);
-        return out;
-    }
-
-    private static double median(List<Double> v) {
-        if (v.isEmpty()) return Double.NaN;
-        v.sort(null);
-        int n = v.size();
-        return n % 2 == 1 ? v.get(n / 2) : (v.get(n / 2 - 1) + v.get(n / 2)) / 2.0;
-    }
-
-    private static void writeRow(Writer out, List<String> fields) throws IOException {
-        String row = TifNameBounds.csvRow(fields.toArray(new String[0]));
-        if (out != null) { out.write(row); out.write('\n'); } else System.out.println(row);
-    }
-
-    private static String requireArg(String[] args, int i, String flag) {
-        if (i >= args.length) { System.err.println(flag + " needs a value"); System.exit(2); }
-        return args[i];
+        return new Meta(LazByProject.median(resolutions),
+                LazByProject.mostCommon(vEpsgs), LazByProject.mostCommon(vNames));
     }
 }

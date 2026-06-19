@@ -136,11 +136,10 @@ public final class LazByProject {
         List<String> vEpsgs = new ArrayList<>(), vNames = new ArrayList<>();
         int step = Math.max(1, files.size() / sample);
         for (int i = 0; i < files.size() && densities.size() < sample; i += step) {
-            String key = (prefix + "/" + files.get(i).replaceAll("^/+", "")).substring("s3://".length());
-            int slash = key.indexOf('/');
-            if (slash < 0) continue;
+            Sources.S3Ref ref = Sources.parseS3(prefix + "/" + files.get(i).replaceAll("^/+", ""));
+            if (ref == null) continue;
             try {
-                LazBinaryReader b = LazBinaryReader.readS3(s3, key.substring(0, slash), key.substring(slash + 1));
+                LazBinaryReader b = LazBinaryReader.readS3(s3, ref.bucket(), ref.key());
                 double area = b.areaSqMetres();
                 if (b.pointCount > 0 && area > 0) densities.add(b.pointCount / area);
                 if (b.verticalEpsg != null) vEpsgs.add("EPSG:" + b.verticalEpsg);
@@ -153,7 +152,7 @@ public final class LazByProject {
     }
 
     /** The most frequently seen value, or {@code ""} if none. */
-    private static String mostCommon(List<String> values) {
+    static String mostCommon(List<String> values) {
         Map<String, Integer> counts = new LinkedHashMap<>();
         for (String v : values) counts.merge(v, 1, Integer::sum);
         return counts.entrySet().stream().max(Map.Entry.comparingByValue())
@@ -161,7 +160,7 @@ public final class LazByProject {
     }
 
     /** Drops {@code geomIdx} from {@code base}, appends {@code extra} and re-appends geometry last. */
-    private static List<String> reorder(List<String> base, int geomIdx, String... extra) {
+    static List<String> reorder(List<String> base, int geomIdx, String... extra) {
         List<String> out = new ArrayList<>(base);
         String geom = geomIdx >= 0 && geomIdx < out.size() ? out.remove(geomIdx) : "";
         out.addAll(List.of(extra));
@@ -169,19 +168,19 @@ public final class LazByProject {
         return out;
     }
 
-    private static double median(List<Double> v) {
+    static double median(List<Double> v) {
         if (v.isEmpty()) return Double.NaN;
         v.sort(null);
         int n = v.size();
         return n % 2 == 1 ? v.get(n / 2) : (v.get(n / 2 - 1) + v.get(n / 2)) / 2.0;
     }
 
-    private static void writeRow(Writer out, List<String> fields) throws IOException {
+    static void writeRow(Writer out, List<String> fields) throws IOException {
         String row = TifNameBounds.csvRow(fields.toArray(new String[0]));
         if (out != null) { out.write(row); out.write('\n'); } else System.out.println(row);
     }
 
-    private static String requireArg(String[] args, int i, String flag) {
+    static String requireArg(String[] args, int i, String flag) {
         if (i >= args.length) { System.err.println(flag + " needs a value"); System.exit(2); }
         return args[i];
     }

@@ -1,30 +1,20 @@
 package com.spotable;
 
-import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.Writer;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.PathMatcher;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
-import java.util.TreeMap;
-import java.util.function.Predicate;
 import java.util.regex.Matcher;
-import java.util.stream.Stream;
 
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
-import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
-import software.amazon.awssdk.services.s3.model.S3Object;
 
 /**
  * Reads header-only metadata from a LAS or LAZ file: the 2D bounding box (min/max X and Y),
@@ -398,7 +388,8 @@ public class LazBinaryReader {
         try (S3Client s3 = needsS3 ? S3Client.create() : null;
              Writer csv = outFile != null
                      ? Files.newBufferedWriter(outFile, StandardCharsets.UTF_8) : null) {
-            List<Source> sources = collectSources(inputArgs, s3);
+            List<Source> sources = Sources.collect(inputArgs, s3, LazBinaryReader::isLasLaz,
+                    LocalSource::new, (bucket, key) -> new S3Source(s3, bucket, key));
             if (sources.isEmpty()) {
                 System.err.println("No LAS/LAZ files matched.");
                 return;
@@ -423,133 +414,9 @@ public class LazBinaryReader {
         }
     }
 
-    /**
-     * Resolves CLI arguments into a sorted, de-duplicated list of sources. Each
-     * argument may be a local file, a local directory (walked recursively for
-     * {@code *.las}/{@code *.laz}), a local glob, or an {@code s3://} URI (single
-     * object, {@code prefix/}, or glob). S3 globs/prefixes are resolved with
-     * ListObjectsV2; the client is only used when an {@code s3://} argument appears.
-     */
-    static List<Source> collectSources(String[] args, S3Client s3) throws IOException {
-        // TreeMap keeps output deterministic (sorted by label) and drops duplicates.
-        Map<String, Source> sources = new TreeMap<>();
-        for (String arg : args) {
-            if (arg.startsWith("s3://")) {
-                collectS3(arg, s3, sources);
-            } else {
-                collectLocal(arg, sources);
-            }
-        }
-        return new ArrayList<>(sources.values());
-    }
-
-    // ---- Local resolution ----
-
-    private static void collectLocal(String arg, Map<String, Source> out) throws IOException {
-        Path p = Path.of(arg);
-        if (Files.isDirectory(p)) {
-            walkLocal(p, k -> true, true, out);
-        } else if (Files.isRegularFile(p)) {
-            addLocal(p, out);
-        } else if (hasGlob(arg)) {
-            expandLocalGlob(arg, out);
-        } else {
-            System.err.println("No such file or directory: " + arg);
-        }
-    }
-
-    private static void walkLocal(Path dir, Predicate<Path> match, boolean lasOnly,
-                                  Map<String, Source> out) throws IOException {
-        try (Stream<Path> walk = Files.walk(dir)) {
-            walk.filter(Files::isRegularFile)
-                .filter(p -> !lasOnly || isLasLaz(p.getFileName().toString()))
-                .filter(match)
-                .forEach(p -> addLocal(p, out));
-        }
-    }
-
-    private static void expandLocalGlob(String pattern, Map<String, Source> out) throws IOException {
-        // Anchor the glob to an absolute path so matching is unambiguous, then
-        // walk from the longest leading directory that contains no glob characters.
-        String abs = Path.of(pattern).toAbsolutePath().normalize().toString();
-        int firstGlob = indexOfGlob(abs);
-        int sep = abs.lastIndexOf(File.separatorChar, firstGlob);
-        Path base = Path.of(sep <= 0 ? File.separator : abs.substring(0, sep));
-        if (!Files.isDirectory(base)) {
-            System.err.println("No matches for glob: " + pattern);
-            return;
-        }
-        PathMatcher matcher = FileSystems.getDefault().getPathMatcher("glob:" + abs);
-        walkLocal(base, matcher::matches, false, out);
-    }
-
-    private static void addLocal(Path p, Map<String, Source> out) {
-        out.put(p.toString(), new LocalSource(p));
-    }
-
-    // ---- S3 resolution ----
-
-    private static void collectS3(String uri, S3Client s3, Map<String, Source> out) {
-        String rest = uri.substring("s3://".length());
-        int slash = rest.indexOf('/');
-        if (slash < 0) {
-            System.err.println("Malformed S3 URI (expected s3://bucket/key): " + uri);
-            return;
-        }
-        String bucket = rest.substring(0, slash);
-        String key = rest.substring(slash + 1);
-
-        if (hasGlob(key)) {
-            // List under the longest non-glob prefix, then match keys against the glob.
-            int g = indexOfGlob(key);
-            int lastSlash = key.lastIndexOf('/', g);
-            String prefix = lastSlash < 0 ? "" : key.substring(0, lastSlash + 1);
-            PathMatcher matcher = FileSystems.getDefault().getPathMatcher("glob:" + key);
-            listS3(s3, bucket, prefix, k -> matcher.matches(Path.of(k)), out);
-        } else if (key.isEmpty() || key.endsWith("/")) {
-            // Prefix ("directory") listing: every *.las/*.laz under it.
-            listS3(s3, bucket, key, LazBinaryReader::isLasLaz, out);
-        } else {
-            // Single object.
-            out.put("s3://" + bucket + "/" + key, new S3Source(s3, bucket, key));
-        }
-    }
-
-    private static void listS3(S3Client s3, String bucket, String prefix,
-                               Predicate<String> keyMatch, Map<String, Source> out) {
-        ListObjectsV2Request req = ListObjectsV2Request.builder()
-                .bucket(bucket).prefix(prefix).build();
-        boolean any = false;
-        for (S3Object o : s3.listObjectsV2Paginator(req).contents()) {
-            String key = o.key();
-            if (key.endsWith("/")) continue;        // skip "folder" placeholder keys
-            if (keyMatch.test(key)) {
-                out.put("s3://" + bucket + "/" + key, new S3Source(s3, bucket, key));
-                any = true;
-            }
-        }
-        if (!any) {
-            System.err.println("No matches under s3://" + bucket + "/" + prefix);
-        }
-    }
-
-    // ---- helpers ----
-
+    /** Name filter passed to {@link Sources}: keeps {@code *.las}/{@code *.laz} during listings. */
     private static boolean isLasLaz(String name) {
         String lower = name.toLowerCase(Locale.ROOT);
         return lower.endsWith(".las") || lower.endsWith(".laz");
-    }
-
-    private static boolean hasGlob(String s) {
-        return indexOfGlob(s) >= 0;
-    }
-
-    private static int indexOfGlob(String s) {
-        for (int i = 0; i < s.length(); i++) {
-            switch (s.charAt(i)) {
-                case '*', '?', '[', '{' -> { return i; }
-            }
-        }
-        return -1;
     }
 }

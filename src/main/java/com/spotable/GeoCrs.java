@@ -57,9 +57,9 @@ final class GeoCrs {
     // The GeoKey ids below are fixed by the GeoTIFF spec. We read each key's inline EPSG value.
 
     /** GeoKey id of the <b>geographic</b> (lon/lat) CRS, e.g. value {@code 4269} = NAD83. */
-    static final int KEY_GEOGRAPHIC_CS = 2048;      // GeographicTypeGeoKey
+    private static final int KEY_GEOGRAPHIC_CS = 2048;      // GeographicTypeGeoKey
     /** GeoKey id of the <b>projected</b> CRS, e.g. value {@code 26917} = NAD83 / UTM zone 17N. */
-    static final int KEY_PROJECTED_CS = 3072;       // ProjectedCSTypeGeoKey
+    private static final int KEY_PROJECTED_CS = 3072;       // ProjectedCSTypeGeoKey
     /** GeoKey id of the projected CRS's linear unit, as an EPSG UoM code (see {@code UOM_*}). */
     static final int KEY_PROJ_LINEAR_UNITS = 3076;  // ProjLinearUnitsGeoKey
     /** GeoKey id of the <b>vertical</b> CRS, e.g. value {@code 5703} = NAVD88 height (metre). */
@@ -75,7 +75,7 @@ final class GeoCrs {
     private static final int UOM_FOOT = 9002;       // international foot (0.3048 m)
     private static final int UOM_US_FOOT = 9003;    // US survey foot (1200/3937 m)
     /** One US survey foot in metres ({@code 1200/3937} ≈ 0.3048006096). */
-    static final double US_SURVEY_FOOT = 1200.0 / 3937.0;
+    private static final double US_SURVEY_FOOT = 1200.0 / 3937.0;
 
     /**
      * Looks up the inline value of GeoKey {@code keyId} in a GeoKeyDirectory.

@@ -6,8 +6,12 @@ import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -152,10 +156,10 @@ public final class TifNameBounds {
         for (int i = 0; i < args.length; i++) {
             String a = args[i];
             switch (a) {
-                case "--input", "-i" -> input = Path.of(requireArg(args, ++i, a));
-                case "--output", "-o" -> output = Path.of(requireArg(args, ++i, a));
-                case "--merged" -> mergedOut = Path.of(requireArg(args, ++i, a));
-                case "--prefix" -> prefix = requireArg(args, ++i, a).replaceAll("/+$", "");
+                case "--input", "-i" -> input = Path.of(LazNameBounds.requireArg(args, ++i, a));
+                case "--output", "-o" -> output = Path.of(LazNameBounds.requireArg(args, ++i, a));
+                case "--merged" -> mergedOut = Path.of(LazNameBounds.requireArg(args, ++i, a));
+                case "--prefix" -> prefix = LazNameBounds.requireArg(args, ++i, a).replaceAll("/+$", "");
                 default -> { System.err.println("Unknown argument: " + a); System.exit(2); }
             }
         }
@@ -174,7 +178,7 @@ public final class TifNameBounds {
         }
 
         // Pass 1: collect the recognised tiles, as LazNameBounds.Matched so the merge can be reused.
-        java.util.List<LazNameBounds.Matched> matched = new java.util.ArrayList<>();
+        List<LazNameBounds.Matched> matched = new ArrayList<>();
         int skipped = 0;
         try (BufferedReader in = Files.newBufferedReader(input, StandardCharsets.UTF_8);
              Writer out = output != null
@@ -203,20 +207,20 @@ public final class TifNameBounds {
         System.err.println("Wrote " + matched.size() + " rows" + (skipped > 0 ? ", skipped " + skipped : ""));
 
         if (mergedOut != null) {
-            java.util.Map<String, java.util.List<LazNameBounds.Matched>> byProject = new java.util.TreeMap<>();
+            Map<String, List<LazNameBounds.Matched>> byProject = new TreeMap<>();
             for (LazNameBounds.Matched m : matched) {
-                byProject.computeIfAbsent(m.project(), k -> new java.util.ArrayList<>()).add(m);
+                byProject.computeIfAbsent(m.project(), k -> new ArrayList<>()).add(m);
             }
             try (Writer out = Files.newBufferedWriter(mergedOut, StandardCharsets.UTF_8)) {
                 out.write(csvRow("project", "directory", "files", "year",
                         "horizontal_epsg", "horizontal_projection", "geometry"));
                 out.write('\n');
                 for (var e : byProject.entrySet()) {
-                    java.util.List<LazNameBounds.Matched> g = e.getValue();
+                    List<LazNameBounds.Matched> g = e.getValue();
                     String directory = LazNameBounds.groupDir(g.get(0).line());
                     if (prefix != null) directory = prefix + "/" + directory.replaceAll("^/+", "");
-                    java.util.TreeSet<String> epsg = new java.util.TreeSet<>();
-                    java.util.TreeSet<String> crs = new java.util.TreeSet<>();
+                    TreeSet<String> epsg = new TreeSet<>();
+                    TreeSet<String> crs = new TreeSet<>();
                     for (LazNameBounds.Matched m : g) { epsg.add(m.proj().epsg()); crs.add(m.proj().crs()); }
                     out.write(csvRow(e.getKey(), directory, Integer.toString(g.size()),
                             LazNameBounds.year(e.getKey(), g.get(0).line()),
@@ -228,12 +232,6 @@ public final class TifNameBounds {
             System.err.println("Wrote " + byProject.size() + " merged project rows to " + mergedOut);
         }
         if (skipped > 0) System.exit(1);
-    }
-
-    /** Returns {@code args[i]} or exits with an error if the flag {@code flag} has no value. */
-    private static String requireArg(String[] args, int i, String flag) {
-        if (i >= args.length) { System.err.println(flag + " needs a value"); System.exit(2); }
-        return args[i];
     }
 
     /**

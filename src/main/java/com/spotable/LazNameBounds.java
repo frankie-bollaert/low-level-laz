@@ -757,7 +757,7 @@ public final class LazNameBounds {
     record Matched(String line, String project, Proj proj, double swE, double swN, Double fixedTile) {}
 
     /** Returns {@code args[i]} or exits with an error if the flag {@code flag} has no value. */
-    private static String requireArg(String[] args, int i, String flag) {
+    static String requireArg(String[] args, int i, String flag) {
         if (i >= args.length) { System.err.println(flag + " needs a value"); System.exit(2); }
         return args[i];
     }

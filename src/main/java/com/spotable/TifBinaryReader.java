@@ -1,6 +1,5 @@
 package com.spotable;
 
-import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.Writer;
@@ -8,23 +7,16 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.nio.channels.SeekableByteChannel;
-import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.PathMatcher;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.TreeMap;
-import java.util.function.Predicate;
-import java.util.stream.Stream;
 
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
-import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
-import software.amazon.awssdk.services.s3.model.S3Object;
 
 /**
  * Reads the georeferenced bounding box and raster metadata from a (Geo)TIFF DTM,
@@ -59,7 +51,7 @@ public class TifBinaryReader {
 
     // GeoKey ids and unit handling live in GeoCrs (shared with LazBinaryReader).
     // Names for the vertical CRS codes seen in these DEMs (GeoTIFF rarely carries a vertical name).
-    private static final java.util.Map<Integer, String> VERTICAL_NAMES = java.util.Map.of(
+    private static final Map<Integer, String> VERTICAL_NAMES = Map.of(
             5703, "NAVD88 height (m)", 6360, "NAVD88 height (ftUS)", 5714, "MSL height (m)");
 
     // How far we'll read at a single offset (IFD window, and any tag payload).
@@ -452,7 +444,8 @@ public class TifBinaryReader {
         try (S3Client s3 = needsS3 ? S3Client.create() : null;
              Writer csv = outFile != null
                      ? Files.newBufferedWriter(outFile, StandardCharsets.UTF_8) : null) {
-            List<Source> sources = collectSources(inputArgs, s3);
+            List<Source> sources = Sources.collect(inputArgs, s3, TifBinaryReader::isTiff,
+                    LocalSource::new, (bucket, key) -> new S3Source(s3, bucket, key));
             if (sources.isEmpty()) {
                 System.err.println("No TIFF files matched.");
                 return;
@@ -477,112 +470,9 @@ public class TifBinaryReader {
         }
     }
 
-    // ---- Source resolution (local + S3, mirroring LazBinaryReader) ----
-
-    static List<Source> collectSources(String[] args, S3Client s3) throws IOException {
-        Map<String, Source> sources = new TreeMap<>();   // sorted + de-duplicated
-        for (String arg : args) {
-            if (arg.startsWith("s3://")) {
-                collectS3(arg, s3, sources);
-            } else {
-                collectLocal(arg, sources);
-            }
-        }
-        return new ArrayList<>(sources.values());
-    }
-
-    private static void collectLocal(String arg, Map<String, Source> out) throws IOException {
-        Path p = Path.of(arg);
-        if (Files.isDirectory(p)) {
-            walkLocal(p, k -> true, true, out);
-        } else if (Files.isRegularFile(p)) {
-            out.put(p.toString(), new LocalSource(p));
-        } else if (hasGlob(arg)) {
-            expandLocalGlob(arg, out);
-        } else {
-            System.err.println("No such file or directory: " + arg);
-        }
-    }
-
-    private static void walkLocal(Path dir, Predicate<Path> match, boolean tiffOnly,
-                                  Map<String, Source> out) throws IOException {
-        try (Stream<Path> walk = Files.walk(dir)) {
-            walk.filter(Files::isRegularFile)
-                .filter(p -> !tiffOnly || isTiff(p.getFileName().toString()))
-                .filter(match)
-                .forEach(p -> out.put(p.toString(), new LocalSource(p)));
-        }
-    }
-
-    private static void expandLocalGlob(String pattern, Map<String, Source> out) throws IOException {
-        String abs = Path.of(pattern).toAbsolutePath().normalize().toString();
-        int firstGlob = indexOfGlob(abs);
-        int sep = abs.lastIndexOf(File.separatorChar, firstGlob);
-        Path base = Path.of(sep <= 0 ? File.separator : abs.substring(0, sep));
-        if (!Files.isDirectory(base)) {
-            System.err.println("No matches for glob: " + pattern);
-            return;
-        }
-        PathMatcher matcher = FileSystems.getDefault().getPathMatcher("glob:" + abs);
-        walkLocal(base, matcher::matches, false, out);
-    }
-
-    private static void collectS3(String uri, S3Client s3, Map<String, Source> out) {
-        String rest = uri.substring("s3://".length());
-        int slash = rest.indexOf('/');
-        if (slash < 0) {
-            System.err.println("Malformed S3 URI (expected s3://bucket/key): " + uri);
-            return;
-        }
-        String bucket = rest.substring(0, slash);
-        String key = rest.substring(slash + 1);
-
-        if (hasGlob(key)) {
-            int g = indexOfGlob(key);
-            int lastSlash = key.lastIndexOf('/', g);
-            String prefix = lastSlash < 0 ? "" : key.substring(0, lastSlash + 1);
-            PathMatcher matcher = FileSystems.getDefault().getPathMatcher("glob:" + key);
-            listS3(s3, bucket, prefix, k -> matcher.matches(Path.of(k)), out);
-        } else if (key.isEmpty() || key.endsWith("/")) {
-            listS3(s3, bucket, key, TifBinaryReader::isTiff, out);
-        } else {
-            out.put("s3://" + bucket + "/" + key, new S3Source(s3, bucket, key));
-        }
-    }
-
-    private static void listS3(S3Client s3, String bucket, String prefix,
-                               Predicate<String> keyMatch, Map<String, Source> out) {
-        ListObjectsV2Request req = ListObjectsV2Request.builder()
-                .bucket(bucket).prefix(prefix).build();
-        boolean any = false;
-        for (S3Object o : s3.listObjectsV2Paginator(req).contents()) {
-            String key = o.key();
-            if (key.endsWith("/")) continue;
-            if (keyMatch.test(key)) {
-                out.put("s3://" + bucket + "/" + key, new S3Source(s3, bucket, key));
-                any = true;
-            }
-        }
-        if (!any) {
-            System.err.println("No matches under s3://" + bucket + "/" + prefix);
-        }
-    }
-
+    /** Name filter passed to {@link Sources}: keeps {@code *.tif}/{@code *.tiff} during listings. */
     private static boolean isTiff(String name) {
         String lower = name.toLowerCase(Locale.ROOT);
         return lower.endsWith(".tif") || lower.endsWith(".tiff");
-    }
-
-    private static boolean hasGlob(String s) {
-        return indexOfGlob(s) >= 0;
-    }
-
-    private static int indexOfGlob(String s) {
-        for (int i = 0; i < s.length(); i++) {
-            switch (s.charAt(i)) {
-                case '*', '?', '[', '{' -> { return i; }
-            }
-        }
-        return -1;
     }
 }
