@@ -24,6 +24,33 @@ final class ArithmeticEncoder {
     private int base = 0;
     private int length = AC__MaxLength;
 
+    /**
+     * Whether this stream's bytes should actually be emitted. The layered point14
+     * encoder always writes symbols into every sub-stream (to keep the model state in
+     * lock-step with the decoder), but a layer for a field that never changed within
+     * the chunk is dropped — {@link #valid} false means {@link #encodedSize()} reports
+     * zero and the bytes are discarded. Mirrors laz-perf's {@code valid} flag.
+     */
+    boolean valid;
+
+    ArithmeticEncoder() {
+        this(true);
+    }
+
+    ArithmeticEncoder(boolean valid) {
+        this.valid = valid;
+    }
+
+    /** Marks this stream as carrying meaningful data, so its bytes will be emitted. */
+    void makeValid() {
+        valid = true;
+    }
+
+    /** Number of bytes this stream contributes to the chunk: 0 when not {@link #valid}. */
+    int encodedSize(byte[] doneBytes) {
+        return valid ? doneBytes.length : 0;
+    }
+
     /** Encodes one bit under an adaptive binary model. */
     void encodeBit(ArithmeticBitModel m, int sym) {
         int x = m.bit0Prob * (length >>> BM__LengthShift);   // product length * P(0)
