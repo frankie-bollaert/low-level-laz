@@ -65,7 +65,7 @@ public class LazWriterTest {
         long index = 0;
         while (index < count) {
             int n = (int) Math.min(h.chunkSize, count - index);
-            Point14Decompressor d = new Point14Decompressor(cursor);
+            Point14Decompressor d = new Point14Decompressor(cursor, 0);
             for (int i = 0; i < n; i++) {
                 d.decompress(dec, 0);
                 int ro = base + (int) (index + i) * Point14.SIZE;

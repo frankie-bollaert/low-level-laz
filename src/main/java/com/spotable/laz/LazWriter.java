@@ -95,6 +95,7 @@ final class LazWriter {
         // --- patch the header ---
         int rawFormat = header[104] & 0x3F;
         header[104] = (byte) (rawFormat | 0x80);             // set compression bit
+        header[105] = 30; header[106] = 0;                   // point record length: 30-byte PDRF 6 (extra bytes dropped)
         u32(header, 96, (int) pointOffset);
         u32(header, 100, vlrs.size());
         // LAS 1.4: legacy counts are zero for PDRF > 5; the extended fields carry the count.

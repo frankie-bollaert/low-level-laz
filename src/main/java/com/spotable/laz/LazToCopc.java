@@ -74,12 +74,18 @@ public final class LazToCopc {
         if (h.lazCompressor != 3) {
             throw new IllegalStateException("only LASzip v3 (PDRF 6) input is supported");
         }
-        int[] counts = perChunkCounts(file, h, count);
-        ByteCursor cursor = new ByteCursor(file, (int) h.pointOffset + 8);
+        int extraBytes = h.pointRecordLength - Point14.SIZE;
+        if (extraBytes < 0) {
+            throw new IllegalStateException("point record length " + h.pointRecordLength + " < " + Point14.SIZE);
+        }
+        // The chunk table gives each chunk's byte start and point count, so chunks decode
+        // independently rather than by walking inline framing sizes.
+        ChunkTable table = ChunkTable.read(file, h, count);
         int idx = 0;
-        for (int n : counts) {
-            Point14Decompressor d = new Point14Decompressor(cursor);
-            for (int j = 0; j < n; j++) d.decompress(records, (idx++) * Point14.SIZE);
+        for (int ci = 0; ci < table.starts.length; ci++) {
+            ByteCursor cursor = new ByteCursor(file, (int) table.starts[ci]);
+            Point14Decompressor d = new Point14Decompressor(cursor, extraBytes);
+            for (int j = 0; j < table.counts[ci]; j++) d.decompress(records, (idx++) * Point14.SIZE);
         }
         if (idx != count) {
             throw new IllegalStateException("decoded " + idx + " points, expected " + count);
@@ -87,33 +93,46 @@ public final class LazToCopc {
         return records;
     }
 
-    /** Per-chunk point counts: derived from the chunk size for fixed chunks, decoded for variable. */
-    private static int[] perChunkCounts(byte[] file, LasHeader h, int count) {
-        if (!h.variableChunks()) {
-            int chunk = h.chunkSize;
-            int nChunks = (int) ((count + (long) chunk - 1) / chunk);
+    /**
+     * The LASzip chunk table (at the offset stored in the first 8 bytes of the point data):
+     * per-chunk point counts and byte start offsets. Fixed-size chunks store only the byte
+     * sizes; variable-size chunks store a point count before each size.
+     */
+    private static final class ChunkTable {
+        final int[] counts;
+        final long[] starts;
+
+        private ChunkTable(int[] counts, long[] starts) {
+            this.counts = counts;
+            this.starts = starts;
+        }
+
+        static ChunkTable read(byte[] file, LasHeader h, int totalPoints) {
+            long tableOffset = i64(file, (int) h.pointOffset);
+            int nChunks = (int) u32(file, (int) tableOffset + 4); // [0]=version, [1]=count
+            boolean variable = h.variableChunks();
             int[] counts = new int[nChunks];
-            int remaining = count;
+            long[] starts = new long[nChunks];
+            ArithmeticDecoder dec = new ArithmeticDecoder(file, (int) tableOffset + 8);
+            IntegerDecompressor ic = new IntegerDecompressor(32, 2);
+            ic.init();
+            int countPred = 0, sizePred = 0;
+            long start = h.pointOffset + 8;
+            int assigned = 0;
             for (int i = 0; i < nChunks; i++) {
-                counts[i] = Math.min(chunk, remaining);
-                remaining -= counts[i];
+                if (variable) {
+                    countPred = ic.decompress(dec, countPred, 0);
+                    counts[i] = countPred;
+                } else {
+                    counts[i] = Math.min(h.chunkSize, totalPoints - assigned);
+                }
+                assigned += counts[i];
+                sizePred = ic.decompress(dec, sizePred, 1);
+                starts[i] = start;
+                start += sizePred & 0xFFFFFFFFL;
             }
-            return counts;
+            return new ChunkTable(counts, starts);
         }
-        // Variable chunks: the table is at the offset stored at the start of the point data.
-        long tableOffset = i64(file, (int) h.pointOffset);
-        int nChunks = (int) u32(file, (int) tableOffset + 4); // [0]=version, [1]=count
-        ArithmeticDecoder dec = new ArithmeticDecoder(file, (int) tableOffset + 8);
-        IntegerDecompressor ic = new IntegerDecompressor(32, 2);
-        ic.init();
-        int[] counts = new int[nChunks];
-        int countPred = 0, offsetPred = 0;
-        for (int i = 0; i < nChunks; i++) {
-            countPred = ic.decompress(dec, countPred, 0);
-            counts[i] = countPred;
-            offsetPred = ic.decompress(dec, offsetPred, 1); // decoded to keep the stream in sync
-        }
-        return counts;
     }
 
     private static Path defaultOutput(Path input) {

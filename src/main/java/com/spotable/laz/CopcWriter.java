@@ -2,8 +2,10 @@ package com.spotable.laz;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -30,6 +32,14 @@ final class CopcWriter {
     private static final int SPAN = 128;
     /** Maximum octree depth; at this depth points are accepted without the voxel test. */
     private static final int MAX_DEPTH = 18;
+    /**
+     * Any octree subtree holding at most this many points is collapsed into a single
+     * leaf node. Without this, dense data leaves a long tail of tiny deep nodes (one
+     * chunk each), and LASzip v3 compresses small chunks poorly — every chunk restarts
+     * the arithmetic models and stores a raw first point plus framing. Collapsing folds
+     * that tail into fuller leaves, cutting chunk count and file size dramatically.
+     */
+    private static final int MIN_NODE_POINTS = 50_000;
 
     private CopcWriter() {}
 
@@ -116,6 +126,9 @@ final class CopcWriter {
             }
         }
 
+        // Fold the long tail of tiny deep nodes into fuller leaves before chunking.
+        collapseSmallSubtrees(nodes);
+
         // Stable node order: shallow-to-deep, then by key. Root (0,0,0,0) comes first.
         List<Map.Entry<NodeKey, Node>> ordered = new ArrayList<>(nodes.entrySet());
         ordered.sort(Comparator
@@ -181,6 +194,56 @@ final class CopcWriter {
                 rootHierOffset, rootHierSize, gpsMin, gpsMax);
 
         return LazWriter.write(headerTemplate, vlrs, chunks, chunkCounts, evlrs, true);
+    }
+
+    /**
+     * Collapses every octree subtree whose total point count is at most
+     * {@link #MIN_NODE_POINTS} into a single leaf node, absorbing its descendants'
+     * points and removing them from the map. Well-filled upper-level nodes are left
+     * intact, so the level-of-detail structure is preserved; only the sparse deep tail
+     * is folded up. The absorbed points stay within the collapsed node's bounds, so the
+     * result is still a valid COPC octree.
+     */
+    private static void collapseSmallSubtrees(Map<NodeKey, Node> nodes) {
+        // Subtree totals, deepest nodes first so children are summed before their parent.
+        List<NodeKey> deepFirst = new ArrayList<>(nodes.keySet());
+        deepFirst.sort(Comparator.comparingInt(NodeKey::d).reversed());
+        Map<NodeKey, Integer> subtree = new HashMap<>();
+        for (NodeKey k : deepFirst) {
+            int total = nodes.get(k).n;
+            for (int i = 0; i < 8; i++) {
+                Integer cs = subtree.get(child(k, i));
+                if (cs != null) total += cs;
+            }
+            subtree.put(k, total);
+        }
+        // Shallowest first: collapse the highest node whose whole subtree is small enough;
+        // its descendants are then removed and skipped.
+        List<NodeKey> shallowFirst = new ArrayList<>(subtree.keySet());
+        shallowFirst.sort(Comparator.comparingInt(NodeKey::d));
+        for (NodeKey k : shallowFirst) {
+            Node target = nodes.get(k);
+            if (target == null) continue;                  // already absorbed by an ancestor
+            if (subtree.get(k) <= MIN_NODE_POINTS) collapseInto(nodes, k, target);
+        }
+    }
+
+    /** Pulls every descendant node's points into {@code target} and drops the descendants. */
+    private static void collapseInto(Map<NodeKey, Node> nodes, NodeKey root, Node target) {
+        Deque<NodeKey> stack = new ArrayDeque<>();
+        for (int i = 0; i < 8; i++) stack.push(child(root, i));
+        while (!stack.isEmpty()) {
+            NodeKey c = stack.pop();
+            Node cn = nodes.remove(c);
+            if (cn == null) continue;                       // no node here ⇒ no descendants either
+            for (int j = 0; j < cn.n; j++) target.add(cn.pts[j]);
+            for (int i = 0; i < 8; i++) stack.push(child(c, i));
+        }
+    }
+
+    private static NodeKey child(NodeKey k, int octant) {
+        return new NodeKey(k.d() + 1, k.x() * 2 + ((octant >> 2) & 1),
+                k.y() * 2 + ((octant >> 1) & 1), k.z() * 2 + (octant & 1));
     }
 
     private static void fillCopcInfo(byte[] d, double cx, double cy, double cz, double half,

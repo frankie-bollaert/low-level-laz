@@ -63,7 +63,7 @@ public class CopcWriterTest {
             long offset = i64(copc, e + 16);
             int pointCount = i32(copc, e + 28);
             assertTrue("node points > 0", pointCount > 0);
-            Point14Decompressor d = new Point14Decompressor(new ByteCursor(copc, (int) offset));
+            Point14Decompressor d = new Point14Decompressor(new ByteCursor(copc, (int) offset), 0);
             for (int j = 0; j < pointCount; j++) {
                 byte[] rec = new byte[Point14.SIZE];
                 d.decompress(rec, 0);

@@ -50,7 +50,7 @@ public class Point14DecodeTest {
         int chunkIdx = 0;
         while (remaining > 0) {
             int n = (int) Math.min(h.chunkSize, remaining);
-            Point14Decompressor d = new Point14Decompressor(cursor);
+            Point14Decompressor d = new Point14Decompressor(cursor, 0);
             for (int i = 0; i < n; i++) {
                 d.decompress(dec, 0);
                 int ro = refBase + (int) (index + i) * Point14.SIZE;

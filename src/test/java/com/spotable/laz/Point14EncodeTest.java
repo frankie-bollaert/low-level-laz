@@ -54,7 +54,7 @@ public class Point14EncodeTest {
             byte[] chunk = enc.finish();
 
             // Decode it back and compare to the originals.
-            Point14Decompressor dec = new Point14Decompressor(new ByteCursor(chunk, 0));
+            Point14Decompressor dec = new Point14Decompressor(new ByteCursor(chunk, 0), 0);
             for (int i = 0; i < n; i++) {
                 dec.decompress(decoded, 0);
                 int ro = base + (int) (index + i) * Point14.SIZE;
@@ -109,7 +109,7 @@ public class Point14EncodeTest {
         for (int i = 0; i < n; i++) enc.compress(in, i * Point14.SIZE);
         byte[] chunk = enc.finish();
 
-        Point14Decompressor dec = new Point14Decompressor(new ByteCursor(chunk, 0));
+        Point14Decompressor dec = new Point14Decompressor(new ByteCursor(chunk, 0), 0);
         byte[] out = new byte[n * Point14.SIZE];
         for (int i = 0; i < n; i++) dec.decompress(out, i * Point14.SIZE);
 

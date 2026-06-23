@@ -7,21 +7,26 @@ import java.util.Arrays;
  * field). A faithful port of laz-perf's {@code detail::Point14Decompressor} together
  * with the PDRF&nbsp;6 chunk framing from {@code point_decompressor_6}.
  * <p>
- * Chunk byte layout (read sequentially from the supplied cursor):
+ * Chunk byte layout (read sequentially from the supplied cursor), where
+ * {@code E = extraByteCount} is the point record length beyond the 30-byte core:
  * <pre>
- *   [30-byte raw first point]
+ *   [raw first point: 30 + E bytes]
  *   [u32 point count]
- *   [9 × u32 layer byte-sizes]
- *   [layer bytes: xy, z, classification, flags, intensity, scan-angle,
+ *   [9 × u32 POINT14 layer byte-sizes][E × u32 extra-byte layer byte-sizes]
+ *   [POINT14 layer bytes: xy, z, classification, flags, intensity, scan-angle,
  *                 user-data, point-source-id, gps-time]   (zero-size layers omitted)
+ *   [E extra-byte layer blocks]
  * </pre>
- * The first point is stored verbatim; every later point is reconstructed from the
- * nine independent arithmetic sub-streams. Layers whose size is zero were never
+ * This matches LASzip v3: the {@code POINT14_v3} and {@code BYTE14_v3} readers each
+ * contribute their layer sizes (then blocks) in turn, and {@code BYTE14_v3} carries one
+ * sub-layer per extra byte. The first point is stored verbatim; every later point is
+ * reconstructed from the nine POINT14 sub-streams. Layers whose size is zero were never
  * "made valid" by the encoder (no point in the chunk changed that field), so the
- * corresponding value is simply carried over from the previous point.
+ * corresponding value is carried over from the previous point.
  * <p>
- * Extra bytes (PDRF with a non-zero point length beyond 30) and the RGB/NIR layers of
- * PDRF&nbsp;7/8 are not handled here; this targets the PDRF&nbsp;6 core record.
+ * Only the 30-byte PDRF&nbsp;6 core is reconstructed: the extra-byte layers are skipped,
+ * not decoded, so any per-point extra bytes are dropped. The RGB/NIR layers of
+ * PDRF&nbsp;7/8 are not handled here.
  */
 final class Point14Decompressor {
 
@@ -89,19 +94,24 @@ final class Point14Decompressor {
 
     private final ByteCursor main;
 
+    /** Point record length beyond the 30-byte core (the BYTE14 extra-byte layers). */
+    private final int extraByteCount;
+
     // The nine layered sub-streams (null == empty/invalid layer; value carried over).
     private ArithmeticDecoder xy, z, classDec, flags, intensityDec, scanAngleDec, userData, pointSrc, gpstimeDec;
     int chunkCount;
 
-    Point14Decompressor(ByteCursor main) {
+    Point14Decompressor(ByteCursor main, int extraByteCount) {
         this.main = main;
+        this.extraByteCount = extraByteCount;
     }
 
     /** Decodes the next point as a 30-byte PDRF 6 record into {@code out} at {@code off}. */
     void decompress(byte[] out, int off) {
         if (lastChannel == -1) {
-            // First point of the chunk: stored raw, then the framing (count + layers).
+            // First point of the chunk: stored raw (30-byte core + extra bytes), then framing.
             main.getBytes(out, off, Point14.SIZE);
+            main.skip(extraByteCount);
             Point14 p = new Point14();
             p.unpack(out, off);
             int sc = p.scannerChannel();
@@ -238,6 +248,8 @@ final class Point14Decompressor {
         chunkCount = main.u32le();
         int[] sizes = new int[9];
         for (int i = 0; i < 9; i++) sizes[i] = main.u32le();
+        // BYTE14 extra-byte layers contribute one size each, after the nine POINT14 sizes.
+        for (int i = 0; i < extraByteCount; i++) main.u32le();
         xy = sub(sizes[0]);
         z = sub(sizes[1]);
         classDec = sub(sizes[2]);

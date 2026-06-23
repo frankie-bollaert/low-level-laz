@@ -30,6 +30,11 @@ final class ByteCursor {
         pos += len;
     }
 
+    /** Advances past {@code len} bytes without reading them. */
+    void skip(int len) {
+        pos += len;
+    }
+
     /** Returns a fresh array of the next {@code len} bytes and advances past them. */
     byte[] take(int len) {
         byte[] s = Arrays.copyOfRange(buf, pos, pos + len);
