@@ -12,6 +12,10 @@ per-tile rows into one CSV per project — see `--partitioned`):
 - `meta/laz-by-project.csv` — `meta/laz-merged.csv` enriched with the **vertical CRS** and measured
   **point density**, read from a sample of actual headers on S3.
 
+> **Picking a target projection?** See [`meta/projection-guide.md`](meta/projection-guide.md) — a
+> full guide to reprojecting these projects (unified archive vs. least-distortion engineering
+> drawings), with verified metric EPSG codes and a generated per-project reprojection plan.
+
 ## Prerequisites
 
 - Java 17+ and Maven.
